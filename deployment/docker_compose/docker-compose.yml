@@ -218,6 +218,11 @@ services:
     restart: unless-stopped
     environment:
       - INTERNAL_URL=${INTERNAL_URL:-http://api_server:8080}
+      # LOCAL-ONLY: Next.js standalone binds to $HOSTNAME (Docker sets it to the
+      # container id), so it listens only on the container IP and the loopback
+      # healthcheck (127.0.0.1:3000) fails. Force bind-all so the healthcheck
+      # passes; nginx still reaches it over the compose network either way.
+      - HOSTNAME=0.0.0.0
     healthcheck:
       test:
         [
