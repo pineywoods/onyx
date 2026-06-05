@@ -39,6 +39,11 @@ name: onyx
 
 services:
   api_server:
+    # LOCAL-ONLY: also attach to rag-llm-experiment1's llm-net so onyx can reach
+    # litellm directly (http://litellm:4000) instead of the flaky public hairpin route.
+    networks:
+      - default
+      - llm-net
     image: ${ONYX_BACKEND_IMAGE:-onyxdotapp/onyx-backend:${IMAGE_TAG:-latest}}
     build:
       context: ../../backend
@@ -118,6 +123,11 @@ services:
       - file-system:/app/file-system
 
   background:
+    # LOCAL-ONLY: also attach to rag-llm-experiment1's llm-net so onyx can reach
+    # litellm directly (http://litellm:4000) instead of the flaky public hairpin route.
+    networks:
+      - default
+      - llm-net
     image: ${ONYX_BACKEND_IMAGE:-onyxdotapp/onyx-backend:${IMAGE_TAG:-latest}}
     build:
       context: ../../backend
@@ -547,6 +557,13 @@ services:
   #       max-size: "50m"
   #       max-file: "6"
   #   entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+networks:
+  # default network is auto-created by compose; declared so services can list it explicitly
+  default:
+  # LOCAL-ONLY: rag-llm-experiment1's llm-net, joined so onyx can reach litellm directly
+  llm-net:
+    external: true
 
 volumes:
   # Necessary for persisting data for use
