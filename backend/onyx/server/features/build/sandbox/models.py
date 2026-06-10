@@ -44,6 +44,10 @@ class SnapshotResult(BaseModel):
 
     storage_path: str
     size_bytes: int
+    # True when the workspace was unchanged since ``previous_digest`` and no new
+    # snapshot was created; the caller should keep reusing the prior snapshot.
+    # (The new snapshot's digest is carried in ``storage_path``, not here.)
+    unchanged: bool = False
 
 
 class SnapshotInfo(BaseModel):

@@ -1095,6 +1095,7 @@ echo "Session cleanup complete"
         sandbox_id: UUID,
         session_id: UUID,
         tenant_id: str,
+        previous_digest: str | None = None,  # noqa: ARG002 - skip unsupported here
     ) -> SnapshotResult | None:
         container = self._get_container(sandbox_id)
         if container is None:

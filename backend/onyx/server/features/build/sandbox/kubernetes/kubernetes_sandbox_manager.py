@@ -1588,6 +1588,7 @@ echo "Session cleanup complete"
         sandbox_id: UUID,
         session_id: UUID,
         tenant_id: str,
+        previous_digest: str | None = None,
     ) -> SnapshotResult | None:
         """Create a FileStore-backed snapshot via the sidecar filesystem API.
 
@@ -1596,9 +1597,16 @@ echo "Session cleanup complete"
         - sessions/$session_id/attachments/
         - sessions/$session_id/.opencode-data/
 
-        Returns None if there are no outputs to snapshot.
+        Returns None if there are no outputs to snapshot, or a SnapshotResult
+        with ``unchanged=True`` when the workspace matches ``previous_digest``.
         """
-        body = SnapshotCreateRequest(session_id=session_id).model_dump_json().encode()
+        body = (
+            SnapshotCreateRequest(
+                session_id=session_id, previous_digest=previous_digest
+            )
+            .model_dump_json()
+            .encode()
+        )
         sha256_hex = hashlib.sha256(body).hexdigest()
 
         last_exc: httpx.TransportError | None = None
@@ -1616,6 +1624,17 @@ echo "Session cleanup complete"
                         "POST", url, content=body, headers=headers
                     ) as resp:
                         if resp.status_code == 204:
+                            if resp.headers.get("X-Snapshot-Unchanged") == "1":
+                                logger.info(
+                                    "Workspace unchanged for session %s; "
+                                    "reusing prior snapshot",
+                                    session_id,
+                                )
+                                return SnapshotResult(
+                                    storage_path="",
+                                    size_bytes=0,
+                                    unchanged=True,
+                                )
                             logger.info(
                                 "No outputs to snapshot for session %s", session_id
                             )
@@ -1626,6 +1645,7 @@ echo "Session cleanup complete"
                                 f"Snapshot create failed: {resp.status_code} {detail}"
                             )
 
+                        tree_digest = resp.headers.get("X-Snapshot-Digest")
                         adapter = _IteratorReader(
                             resp.iter_bytes(chunk_size=_SNAPSHOT_CHUNK_SIZE)
                         )
@@ -1634,6 +1654,7 @@ echo "Session cleanup complete"
                                 stream=adapter,  # ty: ignore[invalid-argument-type]
                                 sandbox_id=str(sandbox_id),
                                 tenant_id=tenant_id,
+                                tree_digest=tree_digest,
                             )
                         )
 

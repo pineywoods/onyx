@@ -1,6 +1,7 @@
 """Database operations for CLI agent sandbox management."""
 
 import datetime
+from itertools import groupby
 from uuid import UUID
 
 from sqlalchemy import and_
@@ -245,35 +246,50 @@ def get_snapshots_for_session(db_session: Session, session_id: UUID) -> list[Sna
     return list(db_session.execute(stmt).scalars().all())
 
 
-def delete_old_snapshots(
-    db_session: Session,
-    tenant_id: str,  # noqa: ARG001
-    retention_days: int,
-) -> int:
-    """Delete snapshots older than retention period, return count deleted.
+def _select_prunable_snapshots(
+    snapshots_by_session_newest_first: list[Snapshot],
+    cutoff_time: datetime.datetime,
+    keep_last_n: int,
+) -> list[Snapshot]:
+    """Pure selection over snapshots ordered by (session_id, created_at desc).
 
-    Note: tenant_id parameter is kept for API compatibility but is not used
-    since Snapshot model no longer has tenant_id. This function deletes
-    all snapshots older than the retention period.
+    Within each session: always keep the newest (the workspace anchor); of the
+    rest, prune anything beyond ``keep_last_n`` or older than ``cutoff_time``.
+    """
+    prunable: list[Snapshot] = []
+    for _session_id, group in groupby(
+        snapshots_by_session_newest_first, key=lambda s: s.session_id
+    ):
+        for rank, snapshot in enumerate(group):
+            if rank == 0:
+                continue
+            if rank >= keep_last_n or snapshot.created_at < cutoff_time:
+                prunable.append(snapshot)
+    return prunable
+
+
+def get_prunable_snapshots(
+    db_session: Session,
+    retention_days: int,
+    keep_last_n: int,
+) -> list[Snapshot]:
+    """Return snapshots eligible for deletion under the retention policy.
+
+    Keeps each session's newest snapshot plus its ``keep_last_n`` most recent,
+    pruning older surplus beyond ``retention_days``. The caller deletes the
+    file-store blobs and DB rows; this only performs selection.
     """
     cutoff_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
         days=retention_days
     )
-
-    stmt = select(Snapshot).where(
-        Snapshot.created_at < cutoff_time,
+    snapshots = list(
+        db_session.execute(
+            select(Snapshot).order_by(Snapshot.session_id, Snapshot.created_at.desc())
+        )
+        .scalars()
+        .all()
     )
-    old_snapshots = db_session.execute(stmt).scalars().all()
-
-    count = 0
-    for snapshot in old_snapshots:
-        db_session.delete(snapshot)
-        count += 1
-
-    if count > 0:
-        db_session.commit()
-
-    return count
+    return _select_prunable_snapshots(snapshots, cutoff_time, keep_last_n)
 
 
 def delete_snapshot(db_session: Session, snapshot_id: UUID) -> bool:

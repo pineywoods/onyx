@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from sandbox_daemon.extract import MAX_BUNDLE_BYTES
 from sandbox_daemon.extract import safe_extract_then_atomic_swap
 from sandbox_daemon.models import SnapshotCreateRequest
-from sandbox_daemon.snapshot import has_snapshot_content
+from sandbox_daemon.snapshot import compute_snapshot_digest
 from sandbox_daemon.snapshot import iter_snapshot_archive
 from sandbox_daemon.snapshot import MAX_SNAPSHOT_ARCHIVE_BYTES
 from sandbox_daemon.snapshot import restore_snapshot
@@ -153,18 +153,25 @@ async def snapshot_create(
         raise HTTPException(status_code=400, detail=f"Invalid request body: {e}")
 
     try:
-        has_content = await asyncio.to_thread(has_snapshot_content, payload.session_id)
+        digest = await asyncio.to_thread(compute_snapshot_digest, payload.session_id)
     except SnapshotError as e:
         raise HTTPException(status_code=500, detail=f"Snapshot create failed: {e}")
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Snapshot create OS error: {e}")
 
-    if not has_content:
+    # None digest means no outputs/ tree worth snapshotting.
+    if digest is None:
         return Response(status_code=204)
+
+    # Workspace is byte-for-byte identical to the last snapshot -- skip the
+    # redundant full tar.gz and let the caller reuse the existing snapshot.
+    if payload.previous_digest is not None and payload.previous_digest == digest:
+        return Response(status_code=204, headers={"X-Snapshot-Unchanged": "1"})
 
     return StreamingResponse(
         iter_snapshot_archive(payload.session_id),
         media_type="application/gzip",
+        headers={"X-Snapshot-Digest": digest},
     )
 
 

@@ -13,6 +13,23 @@ logger = setup_logger()
 
 # File type for snapshot archives
 SNAPSHOT_FILE_TYPE = "application/gzip"
+
+
+def digest_from_storage_path(storage_path: str) -> str | None:
+    """Extract the tree digest embedded in a snapshot storage path, if any.
+
+    Paths are ``.../{snapshot_id}.{digest}.tar.gz`` when a digest was recorded
+    (``{snapshot_id}.tar.gz`` for older snapshots). The snapshot id is a UUID
+    and the digest is hex, so neither contains ``.`` -- making the split
+    unambiguous. Encoding the digest in the path avoids a dedicated DB column.
+    """
+    name = storage_path.rsplit("/", 1)[-1]
+    if name.endswith(".tar.gz"):
+        name = name[: -len(".tar.gz")]
+    parts = name.split(".")
+    return parts[1] if len(parts) > 1 else None
+
+
 MAX_SNAPSHOT_ARCHIVE_BYTES = 100 * 1024 * 1024
 _SNAPSHOT_COPY_CHUNK_BYTES = 8 * 1024 * 1024
 
@@ -60,6 +77,7 @@ class SnapshotManager:
         stream: IO[bytes],
         sandbox_id: str,
         tenant_id: str,
+        tree_digest: str | None = None,
     ) -> tuple[str, str, int]:
         """Persist an already-built tar.gz byte stream as a snapshot.
 
@@ -77,8 +95,12 @@ class SnapshotManager:
             Tuple of (snapshot_id, storage_path, size_bytes).
         """
         snapshot_id = str(uuid4())
+        # Embed the tree digest in the path so the next snapshot can detect an
+        # unchanged workspace without a dedicated DB column.
+        digest_suffix = f".{tree_digest}" if tree_digest else ""
         storage_path = (
-            f"sandbox-snapshots/{tenant_id}/{sandbox_id}/{snapshot_id}.tar.gz"
+            f"sandbox-snapshots/{tenant_id}/{sandbox_id}/"
+            f"{snapshot_id}{digest_suffix}.tar.gz"
         )
         display_name = f"sandbox-snapshot-{sandbox_id}-{snapshot_id}.tar.gz"
         metadata = {
