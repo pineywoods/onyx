@@ -202,11 +202,7 @@ Return the configured autoscaling engine; defaults to HPA when unset.
 {{- if eq (toString (index .Values.configMap "ENABLE_CRAFT" | default "")) "true" -}}true{{- end -}}
 {{- end }}
 
-{{/*
-Egress-proxy env shared by the sandbox PodTemplate's sandbox + sidecar
-containers. Mirrors _proxy_main_container_env_vars() in the manager. Takes a
-dict with `proxyPort` and `caBundleFile`.
-*/}}
+{{/* Sandbox egress-proxy env. Mirrors _proxy_main_container_env_vars(). */}}
 {{- define "onyx.sandboxProxyEnv" -}}
 {{- $proxyUrl := printf "http://sandbox-proxy:%v" .proxyPort }}
 - { name: HTTPS_PROXY, value: "{{ $proxyUrl }}" }

@@ -135,10 +135,7 @@ RESOURCE_DELETION_POLL_INTERVAL_SECONDS = 0.5
 _PUSH_PRIVATE_KEY_ENV = "ONYX_SANDBOX_PUSH_PRIVATE_KEY"
 _PUSH_PUBLIC_KEY_ENV = "ONYX_SANDBOX_PUSH_PUBLIC_KEY"
 
-# Proxy CA bundle path inside the pod — must match the PodTemplate's
-# NODE_EXTRA_CA_CERTS etc. and the firewall-init CA destination. Still set here
-# because _proxy_main_container_env_vars() (shared with the Docker backend)
-# references it.
+# Proxy CA bundle path; still referenced by _proxy_main_container_env_vars().
 _PROXY_CA_BUNDLE_DIR = "/etc/ssl/sandbox"
 _PROXY_CA_BUNDLE_FILE = f"{_PROXY_CA_BUNDLE_DIR}/ca-bundle.crt"
 # Pinned to the proxy IP via pod hostAliases — the iptables lockdown blocks DNS,
@@ -146,8 +143,7 @@ _PROXY_CA_BUNDLE_FILE = f"{_PROXY_CA_BUNDLE_DIR}/ca-bundle.crt"
 _PROXY_ALIAS = "sandbox-proxy"
 _SANDBOX_CONTAINER_NAME = "sandbox"
 
-# Helm-rendered PodTemplate (templates/sandbox-podtemplate.yaml) carrying the
-# static sandbox pod shape, read by _create_sandbox_pod at provision time.
+# Helm-rendered PodTemplate carrying the static sandbox pod shape.
 _PODTEMPLATE_NAME = "sandbox-pod"
 
 # Per-session egress tagging plugin, baked into the sandbox image (see
@@ -555,23 +551,8 @@ class KubernetesSandboxManager(SandboxManager):
         sandbox_id: str,
         tenant_id: str,
     ) -> client.V1Pod:
-        """Build the per-user sandbox Pod from the Helm-managed PodTemplate.
-
-        The static shape of the pod (containers, init container, volumes,
-        security contexts, resources, ports, node selection, proxy env) lives in
-        the ``sandbox-pod`` PodTemplate rendered by the onyx Helm chart into
-        SANDBOX_NAMESPACE (see deployment/.../templates/sandbox-podtemplate.yaml).
-        We read it and overlay only the fields the template cannot carry:
-
-        - ``metadata.name`` + the per-pod sandbox-id / tenant-id labels
-        - the per-pod opencode-auth secretKeyRef env on the sandbox container
-        - ``ONYX_SANDBOX_PUSH_PUBLIC_KEY`` on the sidecar (derived from the
-          api-server's private key at runtime)
-        - ``spec.hostAliases`` pinning the proxy ClusterIP (resolved live; the
-          firewall blocks DNS so it can't be resolved in-pod)
-
-        NOTE: Session-specific setup is done via setup_session_workspace().
-        """
+        """Build the sandbox Pod from the Helm PodTemplate, overlaying the
+        dynamic fields the template can't carry."""
         pod_name = self._get_pod_name(sandbox_id)
 
         try:
@@ -589,16 +570,39 @@ class KubernetesSandboxManager(SandboxManager):
             raise
 
         spec: client.V1PodSpec = copy.deepcopy(pod_template.template.spec)
-        template_labels = dict((pod_template.template.metadata.labels or {}))
+        self._overlay_dynamic_fields(spec, sandbox_id)
 
-        # hostAliases: kubelet injects these into every container's /etc/hosts;
-        # initContainer mutations don't propagate, so we pin the proxy here.
+        return client.V1Pod(
+            api_version="v1",
+            kind="Pod",
+            metadata=client.V1ObjectMeta(
+                name=pod_name,
+                namespace=self._namespace,
+                labels={
+                    **(pod_template.template.metadata.labels or {}),
+                    LABEL_K8S_COMPONENT: LABEL_K8S_COMPONENT_SANDBOX,
+                    LABEL_K8S_MANAGED_BY: LABEL_K8S_MANAGED_BY_ONYX,
+                    LABEL_SANDBOX_ID: sandbox_id,
+                    LABEL_TENANT_ID: tenant_id,
+                },
+            ),
+            spec=spec,
+        )
+
+    def _overlay_dynamic_fields(self, spec: client.V1PodSpec, sandbox_id: str) -> None:
+        """Inject the per-pod values the deploy-time PodTemplate can't carry.
+
+        These are the *only* parts of the pod spec set from Python:
+        - hostAliases pinning the proxy ClusterIP (resolved at runtime; the
+          firewall blocks DNS so the pod can't resolve it itself)
+        - the opencode-auth secretKeyRef env (the Secret name is per-pod)
+        - the push public key on the sidecar (derived from the api-server's
+          private key, so it's never in the chart; sidecar only)
+        """
         spec.host_aliases = [
             client.V1HostAlias(ip=self._resolve_proxy_ip(), hostnames=[_PROXY_ALIAS])
         ]
 
-        # Per-pod opencode-auth secret env — the template can't reference a
-        # per-pod Secret name, so append it here.
         secret_name = self._get_opencode_secret_name(sandbox_id)
         sandbox_container = next(
             c for c in spec.containers if c.name == _SANDBOX_CONTAINER_NAME
@@ -624,30 +628,11 @@ class KubernetesSandboxManager(SandboxManager):
             ),
         ]
 
-        # Push public key — derived from the api-server's private key at runtime,
-        # so it can't be baked into the chart. Sidecar only (never the agent).
         _, push_public_key_b64 = _get_push_key_pair()
         sidecar_container = next(c for c in spec.containers if c.name == "sidecar")
         sidecar_container.env = list(sidecar_container.env or []) + [
             client.V1EnvVar(name=_PUSH_PUBLIC_KEY_ENV, value=push_public_key_b64),
         ]
-
-        return client.V1Pod(
-            api_version="v1",
-            kind="Pod",
-            metadata=client.V1ObjectMeta(
-                name=pod_name,
-                namespace=self._namespace,
-                labels={
-                    **template_labels,
-                    LABEL_K8S_COMPONENT: LABEL_K8S_COMPONENT_SANDBOX,
-                    LABEL_K8S_MANAGED_BY: LABEL_K8S_MANAGED_BY_ONYX,
-                    LABEL_SANDBOX_ID: sandbox_id,
-                    LABEL_TENANT_ID: tenant_id,
-                },
-            ),
-            spec=spec,
-        )
 
     def _create_sandbox_service(
         self,

@@ -79,8 +79,6 @@ ENABLE_OPENCODE_DEBUGGING = (
 # deployment).
 SANDBOX_API_SERVER_URL = os.environ.get("SANDBOX_API_SERVER_URL", "")
 
-# Sandbox pod resource sizing lives in the sandbox-pod PodTemplate (Helm).
-
 # ==============================================================================
 # Sandbox egress proxy
 # ==============================================================================
