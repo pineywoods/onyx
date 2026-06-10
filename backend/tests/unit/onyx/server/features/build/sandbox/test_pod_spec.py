@@ -335,6 +335,14 @@ def test_ca_bundle_mounted_read_only_on_both_containers(pod: client.V1Pod) -> No
         assert mount.mount_path == "/etc/ssl/sandbox"
 
 
+def test_missing_container_raises_clear_error_on_version_skew() -> None:
+    """A chart/api-server version skew (template missing an expected container)
+    must surface as an actionable RuntimeError, not an opaque StopIteration."""
+    spec = client.V1PodSpec(containers=[client.V1Container(name="sandbox")])
+    with pytest.raises(RuntimeError, match="sidecar"):
+        KubernetesSandboxManager._require_container(spec, "sidecar")
+
+
 def test_service_exposes_push_daemon_port() -> None:
     """push/snapshot/health reach the pod via the Service FQDN, so the
     push-daemon port must be exposed on the Service, not just the pod."""

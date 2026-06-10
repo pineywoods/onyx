@@ -142,6 +142,7 @@ _PROXY_CA_BUNDLE_FILE = f"{_PROXY_CA_BUNDLE_DIR}/ca-bundle.crt"
 # so the sandbox can't resolve it on its own.
 _PROXY_ALIAS = "sandbox-proxy"
 _SANDBOX_CONTAINER_NAME = "sandbox"
+_SIDECAR_CONTAINER_NAME = "sidecar"
 
 # Helm-rendered PodTemplate carrying the static sandbox pod shape.
 _PODTEMPLATE_NAME = "sandbox-pod"
@@ -604,9 +605,7 @@ class KubernetesSandboxManager(SandboxManager):
         ]
 
         secret_name = self._get_opencode_secret_name(sandbox_id)
-        sandbox_container = next(
-            c for c in spec.containers if c.name == _SANDBOX_CONTAINER_NAME
-        )
+        sandbox_container = self._require_container(spec, _SANDBOX_CONTAINER_NAME)
         sandbox_container.env = list(sandbox_container.env or []) + [
             client.V1EnvVar(
                 name=OPENCODE_SERVER_PASSWORD,
@@ -629,10 +628,27 @@ class KubernetesSandboxManager(SandboxManager):
         ]
 
         _, push_public_key_b64 = _get_push_key_pair()
-        sidecar_container = next(c for c in spec.containers if c.name == "sidecar")
+        sidecar_container = self._require_container(spec, _SIDECAR_CONTAINER_NAME)
         sidecar_container.env = list(sidecar_container.env or []) + [
             client.V1EnvVar(name=_PUSH_PUBLIC_KEY_ENV, value=push_public_key_b64),
         ]
+
+    @staticmethod
+    def _require_container(spec: client.V1PodSpec, name: str) -> client.V1Container:
+        """Find a container in the PodTemplate by name, or raise a clear error.
+
+        A bare ``next()`` would surface a chart/version skew (template missing
+        the expected container) as an opaque ``StopIteration``; this names the
+        container and the fix, matching the 404 PodTemplate error above.
+        """
+        for container in spec.containers or []:
+            if container.name == name:
+                return container
+        raise RuntimeError(
+            f"PodTemplate '{_PODTEMPLATE_NAME}' has no '{name}' container. "
+            f"The chart and api-server versions are likely out of sync — "
+            f"apply the matching onyx Helm chart."
+        )
 
     def _create_sandbox_service(
         self,
