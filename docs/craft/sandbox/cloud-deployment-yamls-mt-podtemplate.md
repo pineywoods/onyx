@@ -2,7 +2,9 @@
 
 This plan lives in the onyx repo but describes changes to the **separate**
 `cloud-deployment-yamls` repo. It is the follow-up to the Helm PodTemplate work
-(PR that introduced `templates/sandbox-podtemplate.yaml`).
+(PR that introduced `templates/sandbox-podtemplate.yaml`). It is one line item
+in the broader MT parity checklist — see
+[craft-mt-cloud-parity.md](./craft-mt-cloud-parity.md).
 
 ## Issues to Address
 
