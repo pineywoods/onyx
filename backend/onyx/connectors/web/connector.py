@@ -34,6 +34,7 @@ from onyx.connectors.models import SlimDocument
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import web_html_cleanup
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
+from onyx.server.security.models import SSRFProtectionLevel
 from onyx.server.security.models import web_connector_ssrf_enforced
 from onyx.server.security.store import get_security_settings
 from onyx.utils.logger import setup_logger
@@ -117,7 +118,17 @@ def protected_url_check(url: str) -> None:
     """
     # The web connector is only guarded at the most restrictive SSRF level; at
     # VALIDATE_LLM / DISABLED admin-configured connectors may reach private IPs.
-    if not web_connector_ssrf_enforced(get_security_settings().ssrf_protection_level):
+    # Fail closed: if the effective setting can't be loaded we enforce validation
+    # rather than silently relaxing to a weaker env-derived level.
+    try:
+        level = get_security_settings(strict=True).ssrf_protection_level
+    except Exception:
+        logger.warning(
+            "Failed to load security settings; enforcing web connector SSRF "
+            "validation (fail closed)"
+        )
+        level = SSRFProtectionLevel.VALIDATE_ALL
+    if not web_connector_ssrf_enforced(level):
         return
 
     parse = urlparse(url)

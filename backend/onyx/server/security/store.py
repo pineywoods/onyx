@@ -52,6 +52,13 @@ def _install_cache_for_test(
         _CACHE = TTLCache(maxsize=maxsize, ttl=ttl, timer=timer)
 
 
+def _env_flag(raw: str | None) -> bool:
+    """Parse an optional env string as a boolean the same way the dedicated SSRF
+    flags are parsed in ``app_configs`` — only a literal ``"true"`` is truthy, so
+    an explicit ``"false"`` (or empty / unset) is False rather than truthy-string."""
+    return (raw or "").strip().lower() == "true"
+
+
 def _derive_ssrf_level_from_env() -> SSRFProtectionLevel:
     """Map the legacy per-path SSRF env vars to a single protection level so
     existing deployments keep their behavior without touching the new admin
@@ -59,13 +66,21 @@ def _derive_ssrf_level_from_env() -> SSRFProtectionLevel:
     with one of the three levels resolve to the closest match (an operator who
     needs the old fine-grained behavior should pick a level explicitly):
 
-    - DISABLED      when open_url validation is off AND MCP private network is allowed
+    - DISABLED      if any LLM-initiated path was opted out of validation —
+                    open_url SSRF off, or MCP allowed onto the private network
+                    or loopback. DISABLED is the only level that lets those
+                    paths reach internal/loopback targets, so honoring any of
+                    these opt-ins preserves the access an operator already had.
     - VALIDATE_ALL  when the web connector validates URLs (mirrors its truthiness)
     - VALIDATE_LLM  otherwise (the all-defaults case)
     """
-    if not _cfg.OPEN_URL_VALIDATE_SSRF and _cfg.MCP_SERVER_ALLOW_PRIVATE_NETWORK:
+    if (
+        not _cfg.OPEN_URL_VALIDATE_SSRF
+        or _cfg.MCP_SERVER_ALLOW_PRIVATE_NETWORK
+        or _cfg.MCP_SERVER_ALLOW_LOOPBACK
+    ):
         return SSRFProtectionLevel.DISABLED
-    if _cfg.WEB_CONNECTOR_VALIDATE_URLS:
+    if _env_flag(_cfg.WEB_CONNECTOR_VALIDATE_URLS):
         return SSRFProtectionLevel.VALIDATE_ALL
     return SSRFProtectionLevel.VALIDATE_LLM
 
@@ -200,12 +215,17 @@ def invalidate_security_cache(tenant_id: str) -> None:
         _CACHE.pop(tenant_id, None)
 
 
-def get_security_settings() -> SecuritySettings:
+def get_security_settings(*, strict: bool = False) -> SecuritySettings:
     """Effective, env-merged, immutable settings for the current tenant.
 
     Pre-tenant safe: returns env defaults (uncached) when the contextvar is
     unset in multi-tenant. DB errors fall back to env defaults so a Postgres
     outage never bricks the auth path. Returned ``SecuritySettings`` is frozen.
+
+    ``strict=True`` re-raises on a DB-load failure instead of falling back to
+    env defaults — for security-sensitive callers (e.g. the web connector SSRF
+    gate) that must fail closed rather than silently relax to a weaker
+    env-derived level when the admin override can't be read.
     """
     tenant_id = CURRENT_TENANT_ID_CONTEXTVAR.get()
     if tenant_id is None:
@@ -220,6 +240,8 @@ def get_security_settings() -> SecuritySettings:
         try:
             effective = merge_with_env(_load_raw_overrides_unlocked())
         except Exception as e:
+            if strict:
+                raise
             logger.error("Failed to load security settings, using env defaults: %s", e)
             return _build_env_defaults()
         _CACHE[tenant_id] = effective
