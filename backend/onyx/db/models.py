@@ -4114,6 +4114,11 @@ class SecuritySettings(Base):
     track_external_idp_expiry: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
     )
+    # Stored as the SSRFProtectionLevel enum value (e.g. "validate_llm"); None
+    # falls back to the level derived from the legacy SSRF env vars.
+    ssrf_protection_level: Mapped[str | None] = mapped_column(
+        String, nullable=True, default=None
+    )
     mask_credential_prefix: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
     )
