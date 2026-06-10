@@ -1,14 +1,16 @@
 #!/bin/bash
 # Sandbox container supervisor. Runs `opencode serve` in a restart loop.
 #
-# OPENCODE_SERVER_PASSWORD is the only env input. Port and XDG_DATA_HOME
-# are internal contracts (configs.py + sandbox_daemon snapshot path);
-# overriding from env would silently break snapshot capture / restore.
+# OPENCODE_SERVER_PASSWORD is the auth input. Kubernetes also sets
+# OPENCODE_DATA_HOME/OPENCODE_PAUSE_FILE so the sidecar can restore the
+# sandbox-global history DB under the mounted sessions volume. Other backends
+# keep the historical /workspace/.opencode-data default.
 
 set -euo pipefail
 
 OPENCODE_PORT=4096
-export XDG_DATA_HOME=/workspace/.opencode-data
+OPENCODE_PAUSE_FILE="${OPENCODE_PAUSE_FILE:-/workspace/.opencode-serve-paused}"
+export XDG_DATA_HOME="${OPENCODE_DATA_HOME:-/workspace/.opencode-data}"
 mkdir -p "$XDG_DATA_HOME"
 
 child_pid=
@@ -22,6 +24,11 @@ backoff=1
 max_backoff=30
 
 while true; do
+    while [ -e "$OPENCODE_PAUSE_FILE" ]; do
+        echo "[entrypoint] opencode serve paused by restore controller"
+        sleep 0.2
+    done
+
     echo "[entrypoint] starting opencode serve on 0.0.0.0:$OPENCODE_PORT (XDG_DATA_HOME=$XDG_DATA_HOME)"
     set +e
     opencode serve --hostname 0.0.0.0 --port "$OPENCODE_PORT" --print-logs &

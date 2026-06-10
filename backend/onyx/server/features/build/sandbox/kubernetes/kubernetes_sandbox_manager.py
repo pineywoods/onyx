@@ -153,10 +153,18 @@ _SANDBOX_CONTAINER_NAME = "sandbox"
 # Per-session egress tagging plugin, baked into the sandbox image (see
 # docker/Dockerfile). Path must match the COPY destination there.
 _OPENCODE_SESSION_TAG_PLUGIN_PATH = "/workspace/opencode-plugins/session-proxy-tag.ts"
+_OPENCODE_SESSIONS_DIR = "/workspace/sessions"
+_OPENCODE_DATA_HOME = f"{_OPENCODE_SESSIONS_DIR}/.opencode-data"
+_OPENCODE_SERVE_PAUSE_FILE = f"{_OPENCODE_SESSIONS_DIR}/.opencode-serve-paused"
+_OPENCODE_HISTORY_RESTORE_READY_FILE = (
+    f"{_OPENCODE_SESSIONS_DIR}/.opencode-history-restored"
+)
 
 
 _PROXY_RESOLVE_RETRY_ATTEMPTS = 5
 _PROXY_RESOLVE_RETRY_BACKOFF_S = 0.5
+_OPENCODE_HISTORY_RESTORE_READY_TIMEOUT_SECONDS = 300.0
+_OPENCODE_HISTORY_RESTORE_READY_POLL_SECONDS = 0.5
 
 
 # Loopback only: the firewall permits nothing else to bypass the proxy, and the
@@ -404,6 +412,8 @@ class KubernetesSandboxManager(SandboxManager):
     This is a singleton class - use get_sandbox_manager() to get the instance.
     """
 
+    supports_opencode_history_persistence = True
+
     _instance: "KubernetesSandboxManager | None" = None
     _lock = threading.Lock()
 
@@ -637,6 +647,10 @@ class KubernetesSandboxManager(SandboxManager):
                     name="GH_TOKEN", value=SANDBOX_PROXY_INJECTED_PLACEHOLDER
                 ),
                 client.V1EnvVar(name="GH_NO_UPDATE_NOTIFIER", value="1"),
+                client.V1EnvVar(name="OPENCODE_DATA_HOME", value=_OPENCODE_DATA_HOME),
+                client.V1EnvVar(
+                    name="OPENCODE_PAUSE_FILE", value=_OPENCODE_SERVE_PAUSE_FILE
+                ),
                 client.V1EnvVar(
                     name=OPENCODE_SERVER_PASSWORD,
                     value_from=client.V1EnvVarSource(
@@ -1260,6 +1274,7 @@ class KubernetesSandboxManager(SandboxManager):
         )
 
         pod_name = self._get_pod_name(str(sandbox_id))
+        cleanup_already_requested = False
 
         if not onyx_pat:
             raise ValueError("onyx_pat is required for Kubernetes sandbox provisioning")
@@ -1298,6 +1313,8 @@ class KubernetesSandboxManager(SandboxManager):
                     f"opencode-serve never became ready in existing sandbox pod {pod_name}"
                 )
 
+            self._wait_for_opencode_history_restore_if_needed(sandbox_id, tenant_id)
+
             logger.info(
                 "Reusing existing Kubernetes sandbox %s, pod: %s", sandbox_id, pod_name
             )
@@ -1332,6 +1349,7 @@ class KubernetesSandboxManager(SandboxManager):
 
             # 1. Create Pod (user-level only, no session setup)
             logger.debug("Creating Pod %s", pod_name)
+            created_pod = True
             pod = self._create_sandbox_pod(
                 sandbox_id=str(sandbox_id),
                 tenant_id=tenant_id,
@@ -1354,6 +1372,7 @@ class KubernetesSandboxManager(SandboxManager):
                             "During provisioning, discovered that pod %s already exists. Reusing",
                             pod_name,
                         )
+                        created_pod = False
                         # Continue to ensure service exists and wait for ready
                     else:
                         # Pod exists but is not healthy - this shouldn't happen often
@@ -1380,6 +1399,23 @@ class KubernetesSandboxManager(SandboxManager):
                 raise RuntimeError(
                     f"opencode-serve never became ready in sandbox pod {pod_name}"
                 )
+
+            if created_pod:
+                try:
+                    self.restore_opencode_history_snapshot(sandbox_id, tenant_id)
+                    self._mark_opencode_history_restored(sandbox_id)
+                except Exception:
+                    logger.error(
+                        "Failed to restore opencode history for sandbox %s; "
+                        "cleaning up pod so retry cannot reuse an unrestored runtime",
+                        sandbox_id,
+                        exc_info=True,
+                    )
+                    self._cleanup_kubernetes_resources(str(sandbox_id))
+                    cleanup_already_requested = True
+                    raise
+            else:
+                self._wait_for_opencode_history_restore_if_needed(sandbox_id, tenant_id)
 
             logger.info(
                 "Provisioned Kubernetes sandbox %s, pod: %s (no sessions yet)",
@@ -1410,7 +1446,8 @@ class KubernetesSandboxManager(SandboxManager):
                     e,
                     exc_info=True,
                 )
-                self._cleanup_kubernetes_resources(str(sandbox_id))
+                if not cleanup_already_requested:
+                    self._cleanup_kubernetes_resources(str(sandbox_id))
             raise
 
     def _wait_for_resource_deletion(
@@ -1773,7 +1810,6 @@ echo "Session cleanup complete"
         Captures:
         - sessions/$session_id/outputs/
         - sessions/$session_id/attachments/
-        - sessions/$session_id/.opencode-data/
 
         Returns None if there are no outputs to snapshot.
         """
@@ -1832,6 +1868,229 @@ echo "Session cleanup complete"
 
         raise RuntimeError(
             f"Snapshot create request failed: {last_exc or 'no sandbox pod host reachable'}"
+        )
+
+    def create_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+        timeout_seconds: float = 300.0,
+        *,
+        delete_existing_if_empty: bool = False,
+    ) -> bool:
+        body = b""
+        sha256_hex = hashlib.sha256(body).hexdigest()
+
+        last_exc: httpx.TransportError | None = None
+        timeout = httpx.Timeout(
+            timeout_seconds, connect=30.0, read=timeout_seconds, write=timeout_seconds
+        )
+        for host in self._sandbox_pod_hosts(sandbox_id):
+            headers = self._signed_sidecar_headers(
+                endpoint_path="/opencode-history/create",
+                sha256_hex=sha256_hex,
+                content_type="application/octet-stream",
+            )
+            url = f"http://{host}:{PUSH_DAEMON_PORT}/opencode-history/create"
+            try:
+                with httpx.Client(timeout=timeout) as http_client:
+                    with http_client.stream(
+                        "POST", url, content=body, headers=headers
+                    ) as resp:
+                        if resp.status_code == 204:
+                            if delete_existing_if_empty:
+                                self._snapshot_manager.delete_opencode_history_snapshot(
+                                    tenant_id,
+                                    str(sandbox_id),
+                                )
+                                logger.info(
+                                    "No live opencode history for sandbox %s; "
+                                    "deleted existing durable history snapshot",
+                                    sandbox_id,
+                                )
+                                return False
+                            logger.info(
+                                "No opencode history to snapshot for sandbox %s",
+                                sandbox_id,
+                            )
+                            return False
+                        if resp.status_code != 200:
+                            detail = resp.read().decode(errors="replace")
+                            raise RuntimeError(
+                                "opencode history snapshot failed: "
+                                f"{resp.status_code} {detail}"
+                            )
+
+                        adapter = _IteratorReader(
+                            resp.iter_bytes(chunk_size=_SNAPSHOT_CHUNK_SIZE)
+                        )
+                        storage_path, size_bytes = (
+                            self._snapshot_manager.create_opencode_history_snapshot_from_stream(
+                                stream=adapter,  # ty: ignore[invalid-argument-type]
+                                sandbox_id=str(sandbox_id),
+                                tenant_id=tenant_id,
+                            )
+                        )
+                        logger.info(
+                            "Created opencode history snapshot for sandbox %s "
+                            "(path=%s size=%s bytes)",
+                            sandbox_id,
+                            storage_path,
+                            size_bytes,
+                        )
+                        return True
+            except httpx.TransportError as e:
+                last_exc = e
+                continue
+
+        raise RuntimeError(
+            "opencode history snapshot request failed: "
+            f"{last_exc or 'no sandbox pod host reachable'}"
+        )
+
+    def restore_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+        timeout_seconds: float = 300.0,
+    ) -> bool:
+        if not self._snapshot_manager.has_opencode_history_snapshot(
+            tenant_id, str(sandbox_id)
+        ):
+            logger.info("No opencode history snapshot found for sandbox %s", sandbox_id)
+            return False
+
+        paused_opencode_serve = False
+        try:
+            with tempfile.NamedTemporaryFile(mode="w+b", suffix=".tar.gz") as tmp_file:
+                storage_path = SnapshotManager.opencode_history_storage_path(
+                    tenant_id, str(sandbox_id)
+                )
+                self._snapshot_manager.restore_snapshot_to_stream(
+                    storage_path, tmp_file
+                )
+                tmp_file.flush()
+                tmp_file.file.seek(0)
+                sha256_hex = hashlib.file_digest(
+                    cast(io.BufferedRandom, tmp_file.file), "sha256"
+                ).hexdigest()
+                tmp_file.file.seek(0)
+                self._pause_opencode_serve_for_restore(sandbox_id)
+                paused_opencode_serve = True
+                self._post_archive_to_sidecar(
+                    sandbox_id=sandbox_id,
+                    endpoint_path="/opencode-history/restore",
+                    archive_file=tmp_file,
+                    sha256_hex=sha256_hex,
+                    operation_label="opencode history restore",
+                    timeout_seconds=timeout_seconds,
+                )
+            self._resume_opencode_serve_after_restore(sandbox_id)
+            paused_opencode_serve = False
+            logger.info("Restored opencode history snapshot for sandbox %s", sandbox_id)
+            return True
+        except Exception as e:
+            if paused_opencode_serve:
+                try:
+                    self._clear_opencode_serve_pause(sandbox_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to clear opencode serve pause for sandbox %s",
+                        sandbox_id,
+                        exc_info=True,
+                    )
+            raise RuntimeError(
+                f"Failed to restore opencode history snapshot: {e}"
+            ) from e
+
+    def _mark_opencode_history_restored(self, sandbox_id: UUID) -> None:
+        pod_name = self._get_pod_name(str(sandbox_id))
+        try:
+            k8s_stream(
+                self._stream_core_api.connect_get_namespaced_pod_exec,
+                name=pod_name,
+                namespace=self._namespace,
+                container=_SANDBOX_CONTAINER_NAME,
+                command=[
+                    "/bin/sh",
+                    "-c",
+                    (
+                        f"mkdir -p {shlex.quote(_OPENCODE_SESSIONS_DIR)} "
+                        f"&& touch {shlex.quote(_OPENCODE_HISTORY_RESTORE_READY_FILE)}"
+                    ),
+                ],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except ApiException as e:
+            raise RuntimeError(
+                f"Failed to mark opencode history restored for {sandbox_id}: {e}"
+            ) from e
+
+    def _opencode_history_restore_marker_exists(self, sandbox_id: UUID) -> bool:
+        pod_name = self._get_pod_name(str(sandbox_id))
+        try:
+            resp = k8s_stream(
+                self._stream_core_api.connect_get_namespaced_pod_exec,
+                name=pod_name,
+                namespace=self._namespace,
+                container=_SANDBOX_CONTAINER_NAME,
+                command=[
+                    "/bin/sh",
+                    "-c",
+                    (
+                        f"test -f {shlex.quote(_OPENCODE_HISTORY_RESTORE_READY_FILE)} "
+                        "&& echo READY || true"
+                    ),
+                ],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except ApiException:
+            return False
+        return "READY" in str(resp)
+
+    def _wait_for_opencode_history_restore_if_needed(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+    ) -> None:
+        if not self._snapshot_manager.has_opencode_history_snapshot(
+            tenant_id, str(sandbox_id)
+        ):
+            self._mark_opencode_history_restored(sandbox_id)
+            return
+
+        deadline = time.monotonic() + _OPENCODE_HISTORY_RESTORE_READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if self._opencode_history_restore_marker_exists(sandbox_id):
+                return
+            time.sleep(_OPENCODE_HISTORY_RESTORE_READY_POLL_SECONDS)
+        raise RuntimeError(
+            "Timed out waiting for opencode history restore marker in sandbox "
+            f"{sandbox_id}"
+        )
+
+    def has_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+    ) -> bool:
+        return self._snapshot_manager.has_opencode_history_snapshot(
+            tenant_id, str(sandbox_id)
+        )
+
+    def delete_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+    ) -> None:
+        self._snapshot_manager.delete_opencode_history_snapshot(
+            tenant_id, str(sandbox_id)
         )
 
     def session_workspace_exists(
@@ -1980,11 +2239,12 @@ echo "Session cleanup complete"
                     cast(io.BufferedRandom, tmp_file.file), "sha256"
                 ).hexdigest()
                 tmp_file.file.seek(0)
-                self._restore_snapshot_archive_via_sidecar(
+                self._post_archive_to_sidecar(
                     sandbox_id=sandbox_id,
-                    session_id=session_id,
+                    endpoint_path=f"/snapshot/restore/{session_id}",
                     archive_file=tmp_file,
                     sha256_hex=sha256_hex,
+                    operation_label="Snapshot restore",
                 )
 
             # Regenerate configuration files that aren't in the snapshot.
@@ -2862,18 +3122,20 @@ fi
             "X-Push-Timestamp": ts,
         }
 
-    def _restore_snapshot_archive_via_sidecar(
+    def _post_archive_to_sidecar(
         self,
         *,
         sandbox_id: UUID,
-        session_id: UUID,
+        endpoint_path: str,
         archive_file: IO[bytes],
         sha256_hex: str,
+        operation_label: str,
+        timeout_seconds: float = 300.0,
     ) -> None:
-        endpoint_path = f"/snapshot/restore/{session_id}"
-
         last_exc: httpx.TransportError | None = None
-        timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0)
+        timeout = httpx.Timeout(
+            timeout_seconds, connect=30.0, read=timeout_seconds, write=timeout_seconds
+        )
         for host in self._sandbox_pod_hosts(sandbox_id):
             archive_file.seek(0)
             headers = self._signed_sidecar_headers(
@@ -2899,12 +3161,88 @@ fi
             if resp.status_code == 204:
                 return
             raise RuntimeError(
-                f"Snapshot restore failed: {resp.status_code} {resp.text}"
+                f"{operation_label} failed: {resp.status_code} {resp.text}"
             )
 
         raise RuntimeError(
-            f"Snapshot restore request failed: {last_exc or 'no sandbox pod host reachable'}"
+            f"{operation_label} request failed: "
+            f"{last_exc or 'no sandbox pod host reachable'}"
         )
+
+    def _pause_opencode_serve_for_restore(self, sandbox_id: UUID) -> None:
+        pod_name = self._get_pod_name(str(sandbox_id))
+        try:
+            k8s_stream(
+                self._stream_core_api.connect_get_namespaced_pod_exec,
+                name=pod_name,
+                namespace=self._namespace,
+                container=_SANDBOX_CONTAINER_NAME,
+                command=[
+                    "/bin/sh",
+                    "-c",
+                    f"""
+set -eu
+touch {_OPENCODE_SERVE_PAUSE_FILE}
+test -f {_OPENCODE_SERVE_PAUSE_FILE}
+old_pids="$(pgrep -f '[o]pencode serve' || true)"
+if [ -n "$old_pids" ]; then
+    kill -TERM $old_pids 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        still_running=""
+        for pid in $old_pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still_running=1
+            fi
+        done
+        if [ -z "$still_running" ]; then
+            break
+        fi
+        sleep 0.2
+    done
+
+    for pid in $old_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+fi
+if pgrep -f '[o]pencode serve' >/dev/null; then
+    echo "opencode serve still running after pause" >&2
+    exit 1
+fi
+""",
+                ],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except ApiException as e:
+            raise RuntimeError(f"Failed to pause opencode serve: {e}") from e
+
+    def _clear_opencode_serve_pause(self, sandbox_id: UUID) -> None:
+        pod_name = self._get_pod_name(str(sandbox_id))
+        try:
+            k8s_stream(
+                self._stream_core_api.connect_get_namespaced_pod_exec,
+                name=pod_name,
+                namespace=self._namespace,
+                container=_SANDBOX_CONTAINER_NAME,
+                command=["/bin/sh", "-c", f"rm -f {_OPENCODE_SERVE_PAUSE_FILE}"],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except ApiException as e:
+            raise RuntimeError(f"Failed to unpause opencode serve: {e}") from e
+
+    def _resume_opencode_serve_after_restore(self, sandbox_id: UUID) -> None:
+        self._clear_opencode_serve_pause(sandbox_id)
+        if not self._wait_for_opencode_serve_ready(sandbox_id):
+            raise RuntimeError(
+                f"opencode-serve did not become ready after restoring {sandbox_id}"
+            )
 
     def write_files_to_sandbox(
         self,

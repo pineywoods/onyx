@@ -13,6 +13,8 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
+import sqlite3
 import sys
 import tarfile
 import time
@@ -59,7 +61,7 @@ def _load_sandbox_daemon_modules() -> tuple[ModuleType, ModuleType]:
     if "sandbox_daemon" not in sys.modules:
         sys.modules["sandbox_daemon"] = types.ModuleType("sandbox_daemon")
 
-    for name in ("models", "extract", "snapshot", "server"):
+    for name in ("models", "extract", "snapshot", "opencode_history", "server"):
         spec = importlib.util.spec_from_file_location(
             f"sandbox_daemon.{name}", str(_DAEMON_DIR / f"{name}.py")
         )
@@ -105,6 +107,28 @@ def _build_targz_bytes(entries: dict[str, bytes]) -> bytes:
             info.mode = 0o644
             tar.addfile(info, io.BytesIO(data))
     return buf.getvalue()
+
+
+def _point_opencode_paths(
+    opencode_history_mod: ModuleType,
+    sessions_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    opencode_data_dir = sessions_root / ".opencode-data"
+    opencode_db_path = opencode_data_dir / "opencode" / "opencode.db"
+    monkeypatch.setattr(opencode_history_mod, "SESSIONS_ROOT", sessions_root)
+    monkeypatch.setattr(opencode_history_mod, "OPENCODE_DATA_DIR", opencode_data_dir)
+    monkeypatch.setattr(opencode_history_mod, "OPENCODE_DB_PATH", opencode_db_path)
+    return opencode_db_path
+
+
+def _create_opencode_history_archive_bytes(opencode_history_mod: ModuleType) -> bytes:
+    archive_path = opencode_history_mod.create_opencode_history_archive_file()
+    assert archive_path is not None
+    try:
+        return archive_path.read_bytes()
+    finally:
+        archive_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +553,45 @@ def test_snapshot_create_streams_archive_when_content_exists(
     assert captured == {"session_id": session_id, "iter_session_id": session_id}
 
 
+def test_opencode_history_create_empty_returns_204(
+    configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, server_mod, priv, _ = configured_sandbox_daemon
+    monkeypatch.setattr(
+        server_mod, "create_opencode_history_archive_file", lambda: None
+    )
+
+    resp = _signed_snapshot_post(client, "/opencode-history/create", b"", priv)
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+
+def test_opencode_history_create_streams_archive_when_content_exists(
+    configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, server_mod, priv, _ = configured_sandbox_daemon
+    archive_path = tmp_path / "opencode-history.tar.gz"
+    archive_path.write_bytes(b"history-archive")
+    monkeypatch.setattr(
+        server_mod,
+        "create_opencode_history_archive_file",
+        lambda: archive_path,
+    )
+
+    resp = _signed_snapshot_post(client, "/opencode-history/create", b"", priv)
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/gzip")
+    assert resp.content == b"history-archive"
+    assert not archive_path.exists()
+
+
 def test_snapshot_create_rejects_stale_storage_fields(
     configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
     client: TestClient,
@@ -645,6 +708,103 @@ def test_snapshot_restore_rejects_sha_mismatch(
     assert called is False
 
 
+def test_opencode_history_restore_streams_body_to_tempfile_and_returns_204(
+    configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, server_mod, priv, _ = configured_sandbox_daemon
+    captured: dict[str, object] = {}
+
+    def fake_restore_opencode_history_archive(archive_path: Path) -> None:
+        captured["archive_bytes"] = archive_path.read_bytes()
+        captured["archive_exists_during_call"] = archive_path.exists()
+
+    monkeypatch.setattr(
+        server_mod,
+        "restore_opencode_history_archive",
+        fake_restore_opencode_history_archive,
+    )
+
+    body = b"opencode-history-archive"
+    resp = _signed_snapshot_restore_post(
+        client,
+        "/opencode-history/restore",
+        body,
+        priv,
+    )
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+    assert captured == {
+        "archive_bytes": body,
+        "archive_exists_during_call": True,
+    }
+
+
+def test_opencode_history_restore_rejects_sha_mismatch(
+    configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, server_mod, priv, _ = configured_sandbox_daemon
+    called = False
+
+    def fake_restore_opencode_history_archive(_archive_path: Path) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        server_mod,
+        "restore_opencode_history_archive",
+        fake_restore_opencode_history_archive,
+    )
+
+    body = b"opencode-history-archive"
+    wrong_sha = hashlib.sha256(b"different").hexdigest()
+    resp = _signed_snapshot_restore_post(
+        client,
+        "/opencode-history/restore",
+        body,
+        priv,
+        sha_override=wrong_sha,
+    )
+
+    assert resp.status_code == 400
+    assert "SHA-256" in resp.text or "mismatch" in resp.text.lower()
+    assert called is False
+
+
+def test_opencode_history_restore_over_size_cap_returns_413(
+    configured_sandbox_daemon: tuple[ModuleType, ModuleType, Ed25519PrivateKey, Path],
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, server_mod, priv, _ = configured_sandbox_daemon
+    called = False
+
+    def fake_restore_opencode_history_archive(_archive_path: Path) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(server_mod, "MAX_SNAPSHOT_ARCHIVE_BYTES", 4)
+    monkeypatch.setattr(
+        server_mod,
+        "restore_opencode_history_archive",
+        fake_restore_opencode_history_archive,
+    )
+
+    resp = _signed_snapshot_restore_post(
+        client,
+        "/opencode-history/restore",
+        b"12345",
+        priv,
+    )
+
+    assert resp.status_code == 413
+    assert called is False
+
+
 def test_snapshot_restore_extracts_valid_archive(
     sandbox_daemon_modules: tuple[ModuleType, ModuleType],
     tmp_path: Path,
@@ -665,7 +825,6 @@ def test_snapshot_restore_extracts_valid_archive(
             {
                 "outputs/web/page.tsx": b"// hello\n",
                 "attachments/note.txt": b"note\n",
-                ".opencode-data/state.json": b"{}\n",
             }
         )
     )
@@ -674,8 +833,190 @@ def test_snapshot_restore_extracts_valid_archive(
 
     assert (session_path / "outputs/web/page.tsx").read_text() == "// hello\n"
     assert (session_path / "attachments/note.txt").read_text() == "note\n"
-    assert (session_path / ".opencode-data/state.json").read_text() == "{}\n"
     assert not (session_path / "outputs/old.txt").exists()
+
+
+def test_snapshot_restore_rejects_opencode_data_root(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    sessions_root = tmp_path / "sessions"
+    session_id = UUID("00000000-0000-0000-0000-000000000001")
+    monkeypatch.setattr(snapshot_mod, "SESSIONS_ROOT", sessions_root)
+
+    archive = tmp_path / "snapshot.tar.gz"
+    archive.write_bytes(
+        _build_targz_bytes({".opencode-data/opencode/opencode.db": b"sqlite"})
+    )
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="unexpected root"):
+        snapshot_mod.restore_snapshot(session_id, archive)
+
+
+def test_opencode_history_snapshot_round_trips_sqlite_db(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    opencode_db_path = _point_opencode_paths(
+        opencode_history_mod, sessions_root, monkeypatch
+    )
+    opencode_db_path.parent.mkdir(parents=True)
+
+    with sqlite3.connect(opencode_db_path) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
+        conn.execute("INSERT INTO messages (body) VALUES ('hello')")
+
+    archive_bytes = _create_opencode_history_archive_bytes(opencode_history_mod)
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        assert tar.getnames() == [
+            ".opencode-data",
+            ".opencode-data/opencode",
+            ".opencode-data/opencode/opencode.db",
+        ]
+
+    shutil.rmtree(opencode_db_path.parent)
+    archive = tmp_path / "opencode-history.tar.gz"
+    archive.write_bytes(archive_bytes)
+
+    opencode_history_mod.restore_opencode_history_archive(archive)
+
+    with sqlite3.connect(opencode_db_path) as conn:
+        rows = conn.execute("SELECT body FROM messages").fetchall()
+    assert rows == [("hello",)]
+
+
+def test_opencode_history_restore_rejects_unexpected_files(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    _point_opencode_paths(opencode_history_mod, sessions_root, monkeypatch)
+
+    archive = tmp_path / "opencode-history.tar.gz"
+    archive.write_bytes(
+        _build_targz_bytes(
+            {
+                ".opencode-data/opencode/opencode.db": b"SQLite format 3\x00",
+                ".opencode-data/other.txt": b"nope",
+            }
+        )
+    )
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="unexpected file"):
+        opencode_history_mod.restore_opencode_history_archive(archive)
+
+
+def test_opencode_history_restore_rejects_unexpected_directories(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    _point_opencode_paths(opencode_history_mod, sessions_root, monkeypatch)
+
+    archive = tmp_path / "opencode-history.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for directory in (
+            ".opencode-data",
+            ".opencode-data/opencode",
+            ".opencode-data/opencode/cache",
+        ):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            tar.addfile(info)
+        db_info = tarfile.TarInfo(".opencode-data/opencode/opencode.db")
+        db_bytes = b"SQLite format 3\x00"
+        db_info.size = len(db_bytes)
+        tar.addfile(db_info, io.BytesIO(db_bytes))
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="unexpected directory"):
+        opencode_history_mod.restore_opencode_history_archive(archive)
+
+
+def test_opencode_history_restore_rejects_corrupt_sqlite_db(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    _point_opencode_paths(opencode_history_mod, sessions_root, monkeypatch)
+
+    archive = tmp_path / "opencode-history.tar.gz"
+    archive.write_bytes(
+        _build_targz_bytes(
+            {".opencode-data/opencode/opencode.db": b"SQLite format 3\x00broken"}
+        )
+    )
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="integrity check failed"):
+        opencode_history_mod.restore_opencode_history_archive(archive)
+
+
+def test_opencode_history_create_rejects_oversized_sqlite_db(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    opencode_db_path = _point_opencode_paths(
+        opencode_history_mod, sessions_root, monkeypatch
+    )
+    opencode_db_path.parent.mkdir(parents=True)
+
+    with sqlite3.connect(opencode_db_path) as conn:
+        conn.execute("CREATE TABLE messages (body TEXT)")
+        conn.execute("INSERT INTO messages (body) VALUES (?)", ("x" * 1024,))
+
+    monkeypatch.setattr(opencode_history_mod, "MAX_SNAPSHOT_UNCOMPRESSED_BYTES", 16)
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="exceeds"):
+        opencode_history_mod.create_opencode_history_archive_file()
+
+
+def test_opencode_history_create_rejects_corrupt_db_parent(
+    sandbox_daemon_modules: tuple[ModuleType, ModuleType],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = sandbox_daemon_modules
+    snapshot_mod = sys.modules["sandbox_daemon.snapshot"]
+    opencode_history_mod = sys.modules["sandbox_daemon.opencode_history"]
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    opencode_db_path = _point_opencode_paths(
+        opencode_history_mod, sessions_root, monkeypatch
+    )
+    opencode_db_path.parent.parent.mkdir(parents=True)
+    opencode_db_path.parent.write_text("not a directory")
+
+    with pytest.raises(snapshot_mod.SnapshotError, match="parent is not a directory"):
+        opencode_history_mod.create_opencode_history_archive_file()
 
 
 def test_snapshot_restore_rejects_traversal_and_links(
@@ -863,6 +1204,8 @@ def test_snapshot_create_excludes_generated_dirs_from_size_check_and_archive(
     [
         ("/snapshot/create", b'{"session_id":"00000000-0000-0000-0000-000000000003"}'),
         ("/snapshot/restore/00000000-0000-0000-0000-000000000003", b"archive"),
+        ("/opencode-history/create", b""),
+        ("/opencode-history/restore", b"archive"),
     ],
 )
 def test_snapshot_signature_from_wrong_key_is_rejected(

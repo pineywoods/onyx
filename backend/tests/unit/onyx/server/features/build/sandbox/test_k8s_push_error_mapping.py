@@ -37,6 +37,7 @@ from onyx.server.features.build.sandbox.kubernetes.kubernetes_sandbox_manager im
 )
 from onyx.server.features.build.sandbox.models import FatalWriteError
 from onyx.server.features.build.sandbox.models import FileSet
+from onyx.server.features.build.sandbox.models import LLMProviderConfig
 from onyx.server.features.build.sandbox.models import RetriableWriteError
 
 # Path to httpx.Client as imported inside the manager module. Mocking it there
@@ -153,6 +154,19 @@ def _resp(status: int, text: str = "") -> MagicMock:
     resp.status_code = status
     resp.text = text
     return resp
+
+
+def _mock_httpx_stream_client(response: MagicMock) -> MagicMock:
+    client_instance = MagicMock()
+    stream_ctx = MagicMock()
+    stream_ctx.__enter__ = MagicMock(return_value=response)
+    stream_ctx.__exit__ = MagicMock(return_value=False)
+    client_instance.stream.return_value = stream_ctx
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=client_instance)
+    ctx.__exit__ = MagicMock(return_value=False)
+    return MagicMock(return_value=ctx)
 
 
 def _sandbox_id() -> UUID:
@@ -401,13 +415,15 @@ def test_push_maps_http_status_on_fallback_host() -> None:
 def test_snapshot_restore_falls_back_to_pod_ip() -> None:
     mgr = _make_manager()
     archive_body = b"snapshot archive"
+    session_id = _sandbox_id()
     factory = _mock_httpx_per_url(_fqdn_unreachable_then(lambda: _resp(204)))
     with patch(_HTTPX_CLIENT_PATH, factory):
-        mgr._restore_snapshot_archive_via_sidecar(
+        mgr._post_archive_to_sidecar(
             sandbox_id=_sandbox_id(),
-            session_id=_sandbox_id(),
+            endpoint_path=f"/snapshot/restore/{session_id}",
             archive_file=io.BytesIO(archive_body),
             sha256_hex=hashlib.sha256(archive_body).hexdigest(),
+            operation_label="Snapshot restore",
         )
 
 
@@ -420,11 +436,12 @@ def test_snapshot_restore_raises_when_all_hosts_fail() -> None:
     archive_body = b"snapshot archive"
     with patch(_HTTPX_CLIENT_PATH, _mock_httpx_per_url(handler)):
         with pytest.raises(RuntimeError, match="Snapshot restore request failed"):
-            mgr._restore_snapshot_archive_via_sidecar(
+            mgr._post_archive_to_sidecar(
                 sandbox_id=_sandbox_id(),
-                session_id=_sandbox_id(),
+                endpoint_path=f"/snapshot/restore/{_sandbox_id()}",
                 archive_file=io.BytesIO(archive_body),
                 sha256_hex=hashlib.sha256(archive_body).hexdigest(),
+                operation_label="Snapshot restore",
             )
 
 
@@ -447,3 +464,182 @@ def test_push_pod_404_is_retriable() -> None:
                 mount_path="/workspace/managed/skills",
                 files=_files(),
             )
+
+
+def test_create_opencode_history_snapshot_204_preserves_stable_snapshot() -> None:
+    mgr = _make_manager()
+    snapshot_manager = MagicMock()
+    mgr._snapshot_manager = snapshot_manager  # type: ignore[attr-defined]
+    resp = _resp(204)
+
+    with patch(_HTTPX_CLIENT_PATH, _mock_httpx_stream_client(resp)):
+        created = mgr.create_opencode_history_snapshot(
+            sandbox_id=_sandbox_id(),
+            tenant_id="tenant-test",
+        )
+
+    assert created is False
+    snapshot_manager.delete_opencode_history_snapshot.assert_not_called()
+
+
+def test_create_opencode_history_snapshot_204_deletes_when_requested() -> None:
+    mgr = _make_manager()
+    sandbox_id = _sandbox_id()
+    snapshot_manager = MagicMock()
+    mgr._snapshot_manager = snapshot_manager  # type: ignore[attr-defined]
+    resp = _resp(204)
+
+    with patch(_HTTPX_CLIENT_PATH, _mock_httpx_stream_client(resp)):
+        created = mgr.create_opencode_history_snapshot(
+            sandbox_id=sandbox_id,
+            tenant_id="tenant-test",
+            delete_existing_if_empty=True,
+        )
+
+    assert created is False
+    snapshot_manager.delete_opencode_history_snapshot.assert_called_once_with(
+        "tenant-test",
+        str(sandbox_id),
+    )
+
+
+def test_restore_opencode_history_pauses_restore_then_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mgr = _make_manager()
+    sandbox_id = _sandbox_id()
+    expected_sandbox_id = sandbox_id
+    archive_body = b"opencode history archive"
+    calls: list[str] = []
+
+    snapshot_manager = MagicMock()
+    snapshot_manager.has_opencode_history_snapshot.return_value = True
+
+    def restore_to_stream(
+        _storage_path: str,
+        write_stream: io.BufferedIOBase,
+    ) -> None:
+        write_stream.write(archive_body)
+
+    snapshot_manager.restore_snapshot_to_stream.side_effect = restore_to_stream
+    mgr._snapshot_manager = snapshot_manager  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        mgr,
+        "_pause_opencode_serve_for_restore",
+        MagicMock(side_effect=lambda _sandbox_id: calls.append("pause")),
+    )
+
+    def fake_post_archive(
+        *,
+        sandbox_id: UUID,
+        endpoint_path: str,
+        archive_file: io.BufferedIOBase,
+        sha256_hex: str,
+        operation_label: str,
+        timeout_seconds: float,
+    ) -> None:
+        assert sandbox_id == expected_sandbox_id
+        assert endpoint_path == "/opencode-history/restore"
+        assert archive_file.read() == archive_body
+        assert sha256_hex == hashlib.sha256(archive_body).hexdigest()
+        assert operation_label == "opencode history restore"
+        assert timeout_seconds == 300.0
+        calls.append("restore")
+
+    monkeypatch.setattr(
+        mgr,
+        "_post_archive_to_sidecar",
+        MagicMock(side_effect=fake_post_archive),
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_resume_opencode_serve_after_restore",
+        MagicMock(side_effect=lambda _sandbox_id: calls.append("resume")),
+    )
+
+    assert mgr.restore_opencode_history_snapshot(sandbox_id, "tenant-test") is True
+
+    assert calls == ["pause", "restore", "resume"]
+
+
+def test_provision_cleans_up_pod_when_opencode_history_restore_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onyx.server.features.build.sandbox.kubernetes.kubernetes_sandbox_manager as ksm
+
+    monkeypatch.setattr(ksm, "SANDBOX_API_SERVER_URL", "http://api-server")
+    monkeypatch.setattr(ksm, "SANDBOX_PROXY_HOST", "proxy.local")
+
+    sandbox_id = _sandbox_id()
+    mgr = _make_manager()
+    mgr._init_serve_state()
+    monkeypatch.setattr(mgr, "_pod_exists_and_healthy", MagicMock(return_value=False))
+    monkeypatch.setattr(mgr, "_provision_opencode_secret", MagicMock())
+    monkeypatch.setattr(mgr, "_create_sandbox_pod", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(mgr, "_ensure_service_exists", MagicMock())
+    monkeypatch.setattr(mgr, "_wait_for_pod_ready", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        mgr, "_wait_for_opencode_serve_ready", MagicMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        mgr,
+        "restore_opencode_history_snapshot",
+        MagicMock(side_effect=RuntimeError("restore failed")),
+    )
+    cleanup_resources_mock = MagicMock()
+    monkeypatch.setattr(mgr, "_cleanup_kubernetes_resources", cleanup_resources_mock)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        mgr.provision(
+            sandbox_id=sandbox_id,
+            user_id=_sandbox_id(),
+            tenant_id="tenant-test",
+            llm_config=LLMProviderConfig(
+                provider="openai",
+                model_name="gpt-5-mini",
+                api_key=None,
+                api_base=None,
+            ),
+            onyx_pat="pat",
+        )
+
+    cleanup_resources_mock.assert_called_once_with(str(sandbox_id))
+
+
+def test_provision_existing_healthy_pod_waits_for_opencode_history_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import onyx.server.features.build.sandbox.kubernetes.kubernetes_sandbox_manager as ksm
+
+    monkeypatch.setattr(ksm, "SANDBOX_API_SERVER_URL", "http://api-server")
+    monkeypatch.setattr(ksm, "SANDBOX_PROXY_HOST", "proxy.local")
+
+    sandbox_id = _sandbox_id()
+    mgr = _make_manager()
+    mgr._init_serve_state()
+    monkeypatch.setattr(mgr, "_pod_exists_and_healthy", MagicMock(return_value=True))
+    monkeypatch.setattr(mgr, "_ensure_service_exists", MagicMock())
+    monkeypatch.setattr(mgr, "_wait_for_pod_ready", MagicMock(return_value=True))
+    monkeypatch.setattr(
+        mgr, "_wait_for_opencode_serve_ready", MagicMock(return_value=True)
+    )
+    restore_wait_mock = MagicMock()
+    monkeypatch.setattr(
+        mgr, "_wait_for_opencode_history_restore_if_needed", restore_wait_mock
+    )
+
+    info = mgr.provision(
+        sandbox_id=sandbox_id,
+        user_id=_sandbox_id(),
+        tenant_id="tenant-test",
+        llm_config=LLMProviderConfig(
+            provider="openai",
+            model_name="gpt-5-mini",
+            api_key=None,
+            api_base=None,
+        ),
+        onyx_pat="pat",
+    )
+
+    assert info.sandbox_id == sandbox_id
+    restore_wait_mock.assert_called_once_with(sandbox_id, "tenant-test")

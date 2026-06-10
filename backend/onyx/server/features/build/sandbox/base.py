@@ -109,6 +109,8 @@ class SandboxManager(_ServeMixin, ABC):
     Use get_sandbox_manager() to get the appropriate implementation.
     """
 
+    supports_opencode_history_persistence: bool = False
+
     @abstractmethod
     def provision(
         self,
@@ -268,6 +270,51 @@ class SandboxManager(_ServeMixin, ABC):
             RuntimeError: If snapshot restoration fails
         """
         ...
+
+    def create_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+        timeout_seconds: float = 300.0,
+        *,
+        delete_existing_if_empty: bool = False,
+    ) -> bool:
+        """Snapshot sandbox-global opencode history if this backend supports it.
+
+        Returns False when opencode has not created a history DB yet. By default,
+        an empty live store leaves any existing durable archive untouched so idle
+        and recovery snapshots do not discard the last known history. Callers
+        that just deleted a session can set ``delete_existing_if_empty`` to keep
+        durable history from resurrecting deleted opencode sessions later.
+        Callers must gate on ``supports_opencode_history_persistence`` before
+        invoking this optional capability.
+        """
+        _ = sandbox_id, tenant_id, timeout_seconds, delete_existing_if_empty
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support opencode history snapshots"
+        )
+
+    def has_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+    ) -> bool:
+        """Whether durable sandbox-global opencode history exists."""
+        _ = sandbox_id, tenant_id
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support opencode history snapshots"
+        )
+
+    def delete_opencode_history_snapshot(
+        self,
+        sandbox_id: UUID,
+        tenant_id: str,
+    ) -> None:
+        """Delete durable sandbox-global opencode history if this backend supports it."""
+        _ = sandbox_id, tenant_id
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support opencode history snapshots"
+        )
 
     @abstractmethod
     def session_workspace_exists(

@@ -197,6 +197,14 @@ def test_onyx_pat_env_is_placeholder_not_real(pod: client.V1Pod) -> None:
     assert env["ONYX_PAT"] == SANDBOX_PROXY_INJECTED_PLACEHOLDER
 
 
+def test_sandbox_container_opts_into_shared_opencode_history_path(
+    pod: client.V1Pod,
+) -> None:
+    env = {e.name: e.value for e in _container(pod, "sandbox").env}
+    assert env["OPENCODE_DATA_HOME"] == "/workspace/sessions/.opencode-data"
+    assert env["OPENCODE_PAUSE_FILE"] == "/workspace/sessions/.opencode-serve-paused"
+
+
 def test_no_proxy_is_loopback_only() -> None:
     """Only loopback may bypass the proxy; the Onyx API host must route through
     it so the PAT can be injected on the wire."""

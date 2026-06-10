@@ -15,6 +15,7 @@ logger = setup_logger()
 SNAPSHOT_FILE_TYPE = "application/gzip"
 MAX_SNAPSHOT_ARCHIVE_BYTES = 100 * 1024 * 1024
 _SNAPSHOT_COPY_CHUNK_BYTES = 8 * 1024 * 1024
+_OPENCODE_HISTORY_FILE_NAME = "opencode-history.tar.gz"
 
 
 def _copy_snapshot_stream_with_limit(
@@ -55,6 +56,46 @@ class SnapshotManager:
         """
         self._file_store = file_store
 
+    def _save_archive_stream(
+        self,
+        *,
+        stream: IO[bytes],
+        storage_path: str,
+        display_name: str,
+        metadata: dict[str, str],
+        reject_empty: bool = False,
+    ) -> int:
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".tar.gz", delete=False
+            ) as tmp_file:
+                tmp_path = tmp_file.name
+                size_bytes = _copy_snapshot_stream_with_limit(stream, tmp_file)
+                if reject_empty and size_bytes == 0:
+                    raise RuntimeError("snapshot stream was empty")
+
+            with open(tmp_path, "rb") as f:
+                self._file_store.save_file(
+                    content=f,
+                    display_name=display_name,
+                    file_origin=FileOrigin.SANDBOX_SNAPSHOT,
+                    file_type=SNAPSHOT_FILE_TYPE,
+                    file_id=storage_path,
+                    file_metadata=metadata,
+                )
+            return size_bytes
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to cleanup temp file %s: %s",
+                        tmp_path,
+                        cleanup_error,
+                    )
+
     def create_snapshot_from_stream(
         self,
         stream: IO[bytes],
@@ -89,23 +130,13 @@ class SnapshotManager:
 
         # Spool to a temp file so we can enforce the real stream size before
         # handing bytes to the file store and report exact snapshot metadata.
-        tmp_path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=".tar.gz", delete=False
-            ) as tmp_file:
-                tmp_path = tmp_file.name
-                size_bytes = _copy_snapshot_stream_with_limit(stream, tmp_file)
-
-            with open(tmp_path, "rb") as f:
-                self._file_store.save_file(
-                    content=f,
-                    display_name=display_name,
-                    file_origin=FileOrigin.SANDBOX_SNAPSHOT,
-                    file_type=SNAPSHOT_FILE_TYPE,
-                    file_id=storage_path,
-                    file_metadata=metadata,
-                )
+            size_bytes = self._save_archive_stream(
+                stream=stream,
+                storage_path=storage_path,
+                display_name=display_name,
+                metadata=metadata,
+            )
 
             logger.info(
                 "Created snapshot %s for sandbox %s, size: %s bytes",
@@ -121,16 +152,62 @@ class SnapshotManager:
                 e,
             )
             raise RuntimeError(f"Failed to create snapshot: {e}") from e
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception as cleanup_error:
-                    logger.warning(
-                        "Failed to cleanup temp file %s: %s",
-                        tmp_path,
-                        cleanup_error,
-                    )
+
+    @staticmethod
+    def opencode_history_storage_path(tenant_id: str, sandbox_id: str) -> str:
+        return (
+            f"sandbox-snapshots/{tenant_id}/{sandbox_id}/{_OPENCODE_HISTORY_FILE_NAME}"
+        )
+
+    def has_opencode_history_snapshot(self, tenant_id: str, sandbox_id: str) -> bool:
+        return self._file_store.has_file(
+            file_id=self.opencode_history_storage_path(tenant_id, sandbox_id),
+            file_origin=FileOrigin.SANDBOX_SNAPSHOT,
+            file_type=SNAPSHOT_FILE_TYPE,
+        )
+
+    def create_opencode_history_snapshot_from_stream(
+        self,
+        stream: IO[bytes],
+        sandbox_id: str,
+        tenant_id: str,
+    ) -> tuple[str, int]:
+        storage_path = self.opencode_history_storage_path(tenant_id, sandbox_id)
+        display_name = f"sandbox-opencode-history-{sandbox_id}.tar.gz"
+        metadata = {
+            "sandbox_id": sandbox_id,
+            "tenant_id": tenant_id,
+            "snapshot_kind": "opencode_history",
+        }
+
+        try:
+            size_bytes = self._save_archive_stream(
+                stream=stream,
+                storage_path=storage_path,
+                display_name=display_name,
+                metadata=metadata,
+                reject_empty=True,
+            )
+
+            logger.info(
+                "Created opencode history snapshot for sandbox %s, size: %s bytes",
+                sandbox_id,
+                size_bytes,
+            )
+            return storage_path, size_bytes
+        except Exception as e:
+            logger.error(
+                "Failed to create opencode history snapshot for sandbox %s: %s",
+                sandbox_id,
+                e,
+            )
+            raise RuntimeError(
+                f"Failed to create opencode history snapshot: {e}"
+            ) from e
+
+    def delete_opencode_history_snapshot(self, tenant_id: str, sandbox_id: str) -> None:
+        storage_path = self.opencode_history_storage_path(tenant_id, sandbox_id)
+        self._file_store.delete_file(storage_path, error_on_missing=False)
 
     def restore_snapshot_to_stream(
         self,

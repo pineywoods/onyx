@@ -6,6 +6,7 @@ import os
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import UUID
 
@@ -22,6 +23,8 @@ from fastapi.responses import StreamingResponse
 from sandbox_daemon.extract import MAX_BUNDLE_BYTES
 from sandbox_daemon.extract import safe_extract_then_atomic_swap
 from sandbox_daemon.models import SnapshotCreateRequest
+from sandbox_daemon.opencode_history import create_opencode_history_archive_file
+from sandbox_daemon.opencode_history import restore_opencode_history_archive
 from sandbox_daemon.snapshot import has_snapshot_content
 from sandbox_daemon.snapshot import iter_snapshot_archive
 from sandbox_daemon.snapshot import MAX_SNAPSHOT_ARCHIVE_BYTES
@@ -79,6 +82,70 @@ def _verify_signature(
         _get_public_key().verify(sig, message)
     except InvalidSignature:
         raise HTTPException(status_code=401, detail="Invalid signature")
+
+
+def _iter_file_then_unlink(path: Path) -> Iterator[bytes]:
+    try:
+        with path.open("rb") as archive_file:
+            while True:
+                chunk = archive_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def _spool_verified_archive(
+    request: Request,
+    expected_sha256: str,
+    *,
+    archive_label: str,
+) -> Path:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_SNAPSHOT_ARCHIVE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"{archive_label} exceeds "
+                        f"{MAX_SNAPSHOT_ARCHIVE_BYTES} byte limit"
+                    ),
+                )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+
+    archive_path: Path | None = None
+    sha256_hash = hashlib.sha256()
+    size = 0
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
+            archive_path = Path(tmp_file.name)
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_SNAPSHOT_ARCHIVE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"{archive_label} exceeds "
+                            f"{MAX_SNAPSHOT_ARCHIVE_BYTES} byte limit"
+                        ),
+                    )
+                sha256_hash.update(chunk)
+                tmp_file.write(chunk)
+
+        actual_sha = sha256_hash.hexdigest()
+        if actual_sha != expected_sha256.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"SHA-256 mismatch: expected {expected_sha256}, got {actual_sha}",
+            )
+        return archive_path
+    except Exception:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+        raise
 
 
 @app.get("/health")
@@ -183,46 +250,13 @@ async def snapshot_restore(
         x_push_timestamp,
     )
 
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > MAX_SNAPSHOT_ARCHIVE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        "Snapshot archive exceeds "
-                        f"{MAX_SNAPSHOT_ARCHIVE_BYTES} byte limit"
-                    ),
-                )
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid Content-Length")
-
     archive_path: Path | None = None
-    sha256_hash = hashlib.sha256()
-    size = 0
     try:
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
-            archive_path = Path(tmp_file.name)
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_SNAPSHOT_ARCHIVE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            "Snapshot archive exceeds "
-                            f"{MAX_SNAPSHOT_ARCHIVE_BYTES} byte limit"
-                        ),
-                    )
-                sha256_hash.update(chunk)
-                tmp_file.write(chunk)
-
-        actual_sha = sha256_hash.hexdigest()
-        if actual_sha != x_bundle_sha256.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"SHA-256 mismatch: expected {x_bundle_sha256}, got {actual_sha}",
-            )
-
+        archive_path = await _spool_verified_archive(
+            request,
+            x_bundle_sha256,
+            archive_label="Snapshot archive",
+        )
         await asyncio.to_thread(
             restore_snapshot,
             session_id=session_id,
@@ -232,6 +266,78 @@ async def snapshot_restore(
         raise HTTPException(status_code=500, detail=f"Snapshot restore failed: {e}")
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Snapshot restore OS error: {e}")
+    finally:
+        if archive_path is not None:
+            archive_path.unlink(missing_ok=True)
+
+
+@app.post("/opencode-history/create")
+async def opencode_history_create(
+    request: Request,
+    x_push_signature: str = Header(..., alias="X-Push-Signature"),
+    x_push_timestamp: str = Header(..., alias="X-Push-Timestamp"),
+) -> Response:
+    body = await request.body()
+    _verify_signature(
+        "/opencode-history/create",
+        hashlib.sha256(body).hexdigest(),
+        x_push_signature,
+        x_push_timestamp,
+    )
+    if body:
+        raise HTTPException(status_code=400, detail="Request body must be empty")
+
+    archive_path: Path | None = None
+    try:
+        archive_path = await asyncio.to_thread(create_opencode_history_archive_file)
+    except SnapshotError as e:
+        raise HTTPException(
+            status_code=500, detail=f"opencode history create failed: {e}"
+        )
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"opencode history create OS error: {e}"
+        )
+
+    if archive_path is None:
+        return Response(status_code=204)
+
+    return StreamingResponse(
+        _iter_file_then_unlink(archive_path),
+        media_type="application/gzip",
+    )
+
+
+@app.post("/opencode-history/restore", status_code=204)
+async def opencode_history_restore(
+    request: Request,
+    x_bundle_sha256: str = Header(..., alias="X-Bundle-Sha256"),
+    x_push_signature: str = Header(..., alias="X-Push-Signature"),
+    x_push_timestamp: str = Header(..., alias="X-Push-Timestamp"),
+) -> None:
+    _verify_signature(
+        "/opencode-history/restore",
+        x_bundle_sha256.lower(),
+        x_push_signature,
+        x_push_timestamp,
+    )
+
+    archive_path: Path | None = None
+    try:
+        archive_path = await _spool_verified_archive(
+            request,
+            x_bundle_sha256,
+            archive_label="opencode history archive",
+        )
+        await asyncio.to_thread(restore_opencode_history_archive, archive_path)
+    except SnapshotError as e:
+        raise HTTPException(
+            status_code=500, detail=f"opencode history restore failed: {e}"
+        )
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"opencode history restore OS error: {e}"
+        )
     finally:
         if archive_path is not None:
             archive_path.unlink(missing_ok=True)

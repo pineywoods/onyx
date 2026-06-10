@@ -379,6 +379,35 @@ def create_message(
     return message
 
 
+def session_has_assistant_messages(session_id: UUID, db_session: Session) -> bool:
+    """True once the agent has responded at least once in this session."""
+    return bool(
+        db_session.query(
+            db_session.query(BuildMessage.id)
+            .filter(
+                BuildMessage.session_id == session_id,
+                BuildMessage.type == MessageType.ASSISTANT,
+            )
+            .exists()
+        ).scalar()
+    )
+
+
+def session_has_saved_conversation_history(
+    session_id: UUID, db_session: Session
+) -> bool:
+    """True once the session has persisted conversation beyond an initial prompt.
+
+    The interactive first turn persists the USER row before opencode starts, so
+    one user message by itself does not prove there is opencode history to
+    preserve. An assistant response or a later user prompt means there is saved
+    chat history that session-delete safety checks should account for.
+    """
+    return session_has_assistant_messages(session_id, db_session) or (
+        count_user_messages(session_id, db_session) > 1
+    )
+
+
 def count_user_messages(session_id: UUID, db_session: Session) -> int:
     """Count persisted user messages in a build session."""
     return (

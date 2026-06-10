@@ -12,6 +12,7 @@ import zipfile
 from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import AbstractContextManager
+from contextlib import nullcontext
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -48,6 +49,9 @@ from onyx.server.features.build.db.build_session import get_build_session
 from onyx.server.features.build.db.build_session import get_empty_session_for_user
 from onyx.server.features.build.db.build_session import get_session_messages
 from onyx.server.features.build.db.build_session import get_user_build_sessions
+from onyx.server.features.build.db.build_session import (
+    session_has_saved_conversation_history,
+)
 from onyx.server.features.build.db.build_session import update_session_activity
 from onyx.server.features.build.db.sandbox import get_sandbox_by_user_id
 from onyx.server.features.build.db.sandbox import get_snapshots_for_session
@@ -648,42 +652,105 @@ class SessionManager:
 
         # Get user's sandbox to clean up session workspace
         sandbox = get_sandbox_by_user_id(self._db_session, user_id)
+        prompt_slot_cm: AbstractContextManager[bool]
         if sandbox and sandbox.status.is_active():
-            # Clean up session workspace (but don't terminate sandbox)
-            try:
-                self._sandbox_manager.cleanup_session_workspace(
-                    sandbox_id=sandbox.id,
-                    session_id=session_id,
-                    nextjs_port=session.nextjs_port,
-                )
-                logger.info(
-                    "Cleaned up session workspace %s in sandbox %s",
-                    session_id,
-                    sandbox.id,
-                )
-            except Exception as e:
-                # Log but don't fail - session can still be deleted even if
-                # workspace cleanup fails (e.g., if pod is already terminated)
-                logger.warning(
-                    "Failed to cleanup session workspace %s: %s", session_id, e
+            prompt_slot_cm = self._sandbox_manager.prompt_slot(sandbox.id, session_id)
+        else:
+            prompt_slot_cm = nullcontext(True)
+
+        with prompt_slot_cm as acquired_prompt_slot:
+            if not acquired_prompt_slot:
+                raise OnyxError(
+                    OnyxErrorCode.CONFLICT,
+                    "This session is busy with an active turn. Try again when it finishes.",
                 )
 
-        # Delete snapshot files from FileStore before removing DB records
-        snapshots = get_snapshots_for_session(self._db_session, session_id)
-        if snapshots:
-            snapshot_manager = SnapshotManager(get_default_file_store())
-            for snapshot in snapshots:
-                try:
-                    snapshot_manager.delete_snapshot(snapshot.storage_path)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to delete snapshot file %s: %s",
-                        snapshot.storage_path,
-                        e,
+            if sandbox and self._sandbox_manager.supports_opencode_history_persistence:
+                tenant_id = get_current_tenant_id()
+                has_saved_history = session_has_saved_conversation_history(
+                    session.id, self._db_session
+                )
+                opencode_session_id = session.opencode_session_id
+                if sandbox.status.is_active():
+                    if opencode_session_id is None and has_saved_history:
+                        raise RuntimeError(
+                            "Cannot delete opencode-backed build session "
+                            f"{session_id} without a persisted opencode_session_id; "
+                            "shared opencode history would remain stale"
+                        )
+
+                    if opencode_session_id is not None:
+                        deleted = self._sandbox_manager.delete_opencode_session(
+                            sandbox.id,
+                            session_id,
+                            opencode_session_id,
+                        )
+                        if not deleted:
+                            raise RuntimeError(
+                                "Failed to delete opencode session "
+                                f"{opencode_session_id}"
+                            )
+
+                        self._sandbox_manager.create_opencode_history_snapshot(
+                            sandbox.id,
+                            tenant_id,
+                            delete_existing_if_empty=True,
+                        )
+                elif (
+                    opencode_session_id is not None or has_saved_history
+                ) and self._sandbox_manager.has_opencode_history_snapshot(
+                    sandbox.id, tenant_id
+                ):
+                    if opencode_session_id is None:
+                        raise RuntimeError(
+                            "Cannot delete opencode-backed build session "
+                            f"{session_id} without a persisted opencode_session_id; "
+                            "shared opencode history would remain stale"
+                        )
+                    raise RuntimeError(
+                        "Cannot delete opencode-backed build session "
+                        f"{session_id} while sandbox {sandbox.id} is not running; "
+                        "shared opencode history would remain stale"
                     )
 
-        # Delete session (uses flush, caller commits)
-        return delete_build_session__no_commit(session_id, user_id, self._db_session)
+            if sandbox and sandbox.status.is_active():
+                # Clean up session workspace (but don't terminate sandbox)
+                try:
+                    self._sandbox_manager.cleanup_session_workspace(
+                        sandbox_id=sandbox.id,
+                        session_id=session_id,
+                        nextjs_port=session.nextjs_port,
+                    )
+                    logger.info(
+                        "Cleaned up session workspace %s in sandbox %s",
+                        session_id,
+                        sandbox.id,
+                    )
+                except Exception as e:
+                    # Log but don't fail - session can still be deleted even if
+                    # workspace cleanup fails (e.g., if pod is already terminated)
+                    logger.warning(
+                        "Failed to cleanup session workspace %s: %s", session_id, e
+                    )
+
+            # Delete snapshot files from FileStore before removing DB records
+            snapshots = get_snapshots_for_session(self._db_session, session_id)
+            if snapshots:
+                snapshot_manager = SnapshotManager(get_default_file_store())
+                for snapshot in snapshots:
+                    try:
+                        snapshot_manager.delete_snapshot(snapshot.storage_path)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to delete snapshot file %s: %s",
+                            snapshot.storage_path,
+                            e,
+                        )
+
+            # Delete session (uses flush, caller commits)
+            return delete_build_session__no_commit(
+                session_id, user_id, self._db_session
+            )
 
     # =========================================================================
     # Message Operations
@@ -1500,8 +1567,13 @@ class SessionManager:
         if sandbox is None:
             return False
 
+        tenant_id = get_current_tenant_id()
         if sandbox.status == SandboxStatus.TERMINATED:
             logger.info("Sandbox %s already terminated", sandbox.id)
+            if self._sandbox_manager.supports_opencode_history_persistence:
+                self._sandbox_manager.delete_opencode_history_snapshot(
+                    sandbox.id, tenant_id
+                )
             return True
 
         try:
@@ -1509,14 +1581,28 @@ class SessionManager:
             self._sandbox_manager.terminate(sandbox.id)
             logger.info("Terminated sandbox %s for user %s", sandbox.id, user_id)
 
-            # Update status in database
             update_sandbox_status__no_commit(
                 self._db_session, sandbox.id, SandboxStatus.TERMINATED
             )
-            self._db_session.flush()
-
-            return True
-
+            self._db_session.commit()
         except Exception as e:
             logger.error("Failed to terminate sandbox %s: %s", sandbox.id, e)
             raise RuntimeError(f"Failed to terminate sandbox: {e}") from e
+
+        if self._sandbox_manager.supports_opencode_history_persistence:
+            try:
+                self._sandbox_manager.delete_opencode_history_snapshot(
+                    sandbox.id, tenant_id
+                )
+            except Exception as e:
+                logger.error(
+                    "Terminated sandbox %s but failed to delete opencode history: %s",
+                    sandbox.id,
+                    e,
+                )
+                raise RuntimeError(
+                    "Terminated sandbox but failed to delete opencode history snapshot: "
+                    f"{e}"
+                ) from e
+
+        return True
