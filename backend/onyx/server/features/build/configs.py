@@ -38,6 +38,12 @@ SANDBOX_MAX_CONCURRENT_PER_ORG = int(
 SNAPSHOT_RETENTION_DAYS = int(os.environ.get("SNAPSHOT_RETENTION_DAYS", "30"))
 SNAPSHOT_KEEP_LAST_N = int(os.environ.get("SNAPSHOT_KEEP_LAST_N", "3"))
 
+# Data-loss bound for ungraceful pod death: the sweep skips sessions whose
+# latest snapshot is newer than this.
+SANDBOX_PERIODIC_SNAPSHOT_INTERVAL_SECONDS = int(
+    os.environ.get("SANDBOX_PERIODIC_SNAPSHOT_INTERVAL_SECONDS", "1800")
+)
+
 SANDBOX_NEXTJS_PORT_START = int(os.environ.get("SANDBOX_NEXTJS_PORT_START", "3010"))
 SANDBOX_NEXTJS_PORT_END = int(os.environ.get("SANDBOX_NEXTJS_PORT_END", "3100"))
 
