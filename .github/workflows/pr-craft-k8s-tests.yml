@@ -53,11 +53,7 @@ env:
   SANDBOX_NAMESPACE: "onyx-sandboxes"
   SANDBOX_SERVICE_ACCOUNT_NAME: "sandbox"
   SANDBOX_CONTAINER_IMAGE: "localhost:5001/onyx-sandbox:ci"
-  # Sandbox pod resource requests for the 4 vCPU runner now live in
-  # values-ci.yaml (configMap.SANDBOX_POD_*); they bake into the rendered
-  # sandbox-pod PodTemplate the manager reads at provision time.
-  # Placeholder — only injected as ONYX_SERVER_URL into the pod; the
-  # tests never call back to it, so the URL doesn't need to resolve.
+  # Sandbox pod resource requests live in values-ci.yaml (configMap.SANDBOX_POD_*).
   SANDBOX_API_SERVER_URL: "http://api-server.onyx-ci.invalid"
 
   # Proxy lives in release namespace `onyx`. SANDBOX_PROXY_HOST is set

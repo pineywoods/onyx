@@ -1,16 +1,8 @@
 {{- if eq (include "onyx.craftEnabled" .) "true" }}
 {{/*
-Static shape of the per-user sandbox Pod. The api-server reads this PodTemplate
-at provision time and overlays only the dynamic per-pod fields:
-  - metadata.name + the sandbox-id / tenant-id labels
-  - the per-pod opencode-auth secretKeyRef env (sandbox container)
-  - the ONYX_SANDBOX_PUSH_PUBLIC_KEY env (sidecar; derived from the api-server's
-    private key at runtime)
-  - spec.hostAliases[0].ip (the proxy ClusterIP, resolved live)
-Everything else lives here so the pod's shape is changeable via `helm upgrade`
-without a backend rebuild. Resource/image/port values read the same
-configMap.* keys the env-var path used, so existing overlays work unchanged.
-See backend/.../kubernetes_sandbox_manager.py::_create_sandbox_pod.
+Static shape of the per-user sandbox Pod. _create_sandbox_pod reads this and
+overlays the dynamic fields (name, sandbox/tenant labels, per-pod
+opencode-auth + push-key env, proxy hostAliases IP).
 */}}
 {{- $cm := .Values.configMap }}
 {{- $sandboxNs := $cm.SANDBOX_NAMESPACE | default "onyx-sandboxes" }}

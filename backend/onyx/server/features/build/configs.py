@@ -79,10 +79,7 @@ ENABLE_OPENCODE_DEBUGGING = (
 # deployment).
 SANDBOX_API_SERVER_URL = os.environ.get("SANDBOX_API_SERVER_URL", "")
 
-# Sandbox pod resource sizing is owned by the Helm chart's sandbox-pod
-# PodTemplate (deployment/.../templates/sandbox-podtemplate.yaml), which reads
-# the configMap.SANDBOX_POD_* keys. CI overrides them in values-ci.yaml for the
-# 4 vCPU kind runner; prod uses the chart defaults.
+# Sandbox pod resource sizing lives in the sandbox-pod PodTemplate (Helm).
 
 # ==============================================================================
 # Sandbox egress proxy
