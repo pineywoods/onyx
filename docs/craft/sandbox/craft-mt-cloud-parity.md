@@ -38,7 +38,7 @@ so nothing is broken yet — but every piece below must land before flipping it 
 | `onyx-sandboxes` namespace | `sandbox-namespace.yaml` | No explicit manifest in `danswer/` (created out-of-band) — needs one |
 | sandbox-manager RBAC (pods, **podtemplates**, services, **secrets**, pods/exec, **pods/log**) | `sandbox-rbac.yaml` | `danswer/role/api-server-role.yaml` has only pods, pods/exec, services — missing podtemplates, secrets, pods/log |
 | `sandbox-file-sync` SA + IRSA annotation | `sandbox-rbac.yaml` + `craft.sandboxFileSyncRoleArn` | SA exists (`danswer/serviceaccount/sandbox-file-sync-sa.yaml`); verify IRSA + `skip-containers: sandbox` annotations |
-| **sandbox-pod PodTemplate** | `sandbox-podtemplate.yaml` (this PR) | Missing — see [cloud-deployment-yamls-mt-podtemplate.md](./cloud-deployment-yamls-mt-podtemplate.md) |
+| **sandbox-pod PodTemplate** | `sandbox-podtemplate.yaml` (this PR) | Missing — needs a static `danswer/` manifest (item 1) |
 | Egress proxy (deployment/service/rbac/networkpolicy/pdb) | `templates/sandbox-proxy/*` | **Missing entirely** in `danswer/` |
 | Proxy CA secret + CA bundle configmap | chart proxy templates | Missing — needed for the init container's TLS bundle |
 | `SANDBOX_PROXY_HOST` / `SANDBOX_PROXY_PORT` | computed in `configmap.yaml` | Not set in `danswer/configmap/env-configmap.yaml` |
@@ -55,11 +55,24 @@ treat the Helm chart as the source of truth and render prod values into static
 `danswer/` manifests.
 
 ### Raw manifests (`danswer/`)
-1. **PodTemplate + RBAC reconcile** — see the dedicated plan
-   [cloud-deployment-yamls-mt-podtemplate.md](./cloud-deployment-yamls-mt-podtemplate.md):
-   add `danswer/podtemplate/sandbox-pod.yaml`, register it in
-   `kustomization.yaml`, and bring `api-server-role.yaml` up to the full verb
-   set (podtemplates/secrets/pods/log).
+1. **PodTemplate + RBAC reconcile.**
+   - Add `danswer/podtemplate/sandbox-pod.yaml` — a static `v1/PodTemplate`
+     named `sandbox-pod` in `onyx-sandboxes`, mirroring the Helm-rendered
+     `templates/sandbox-podtemplate.yaml` with MT prod values baked in: image
+     `onyxdotapp/sandbox:v0.1.53` (bump in lockstep with the chart default),
+     ServiceAccount `sandbox-file-sync`, prod resource sizing (1000m/2Gi req,
+     2000m/10Gi lim), Next.js port range 3010–3100, push-daemon port 8731, and
+     the prod proxy host/port + CA configmap. Register it in
+     `danswer/kustomization.yaml`.
+   - Reconcile `danswer/role/api-server-role.yaml` to the Helm `sandbox-manager`
+     Role's full verb set: it currently has only `pods`, `pods/exec`,
+     `services` — add `podtemplates: get` (new: `read_namespaced_pod_template`),
+     `secrets` (get/create/update/delete, for the per-pod opencode-auth Secret),
+     and `pods/log: get`. Both `api-server-sa` and `celery-worker-sandbox-sa`
+     bind to this one Role, so a single edit covers both.
+   - The PodTemplate is the source-of-truth-bound copy of the chart template;
+     add a lockstep-update comment in both so future pod-shape changes update
+     both surfaces.
 2. **Namespace** — add an `onyx-sandboxes` Namespace manifest (or confirm the
    out-of-band creation is acceptable for ArgoCD ownership).
 3. **Egress proxy stack** — port `templates/sandbox-proxy/*` (deployment,
