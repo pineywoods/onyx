@@ -10,6 +10,18 @@ configMap:
   # Placeholder; the K8s sandbox tests don't call back to it. Required to
   # satisfy the chart's fail() guard for ENABLE_CRAFT=true.
   SANDBOX_API_SERVER_URL: "http://api.invalid"
+  # Sandbox image the kind cluster pulls — baked into the rendered PodTemplate.
+  # Matches the image built+pushed to the local registry by the CI workflow.
+  SANDBOX_CONTAINER_IMAGE: "localhost:5001/onyx-sandbox:ci"
+  # The 4 vCPU CI runner provisions up to 4 sandbox pods concurrently. With
+  # prod-default requests (1 CPU/pod) the 4th stays Pending and trips the 60s
+  # readiness ceiling. These bake into the rendered sandbox-pod PodTemplate so
+  # kind's scheduler can fit all four. (Previously set via the workflow env,
+  # back when the manager built the pod from os.environ.)
+  SANDBOX_POD_CPU_REQUEST: "100m"
+  SANDBOX_POD_MEMORY_REQUEST: "256Mi"
+  SANDBOX_POD_CPU_LIMIT: "2000m"
+  SANDBOX_POD_MEMORY_LIMIT: "4Gi"
 
 # Placeholder secret values so auth-secrets.yaml renders without erroring.
 # Postgres/Redis run in docker-compose alongside the kind

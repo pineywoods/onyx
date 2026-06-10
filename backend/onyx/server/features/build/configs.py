@@ -79,14 +79,10 @@ ENABLE_OPENCODE_DEBUGGING = (
 # deployment).
 SANDBOX_API_SERVER_URL = os.environ.get("SANDBOX_API_SERVER_URL", "")
 
-# Defaults match production sizing. CI overrides these in kind clusters where
-# the runner only has 4 vCPU and we provision 4+ sandbox pods concurrently; the
-# k8s scheduler honors requests, so production defaults would block all but one
-# pod from being scheduled at the same time.
-SANDBOX_POD_CPU_REQUEST = os.environ.get("SANDBOX_POD_CPU_REQUEST", "1000m")
-SANDBOX_POD_MEMORY_REQUEST = os.environ.get("SANDBOX_POD_MEMORY_REQUEST", "2Gi")
-SANDBOX_POD_CPU_LIMIT = os.environ.get("SANDBOX_POD_CPU_LIMIT", "2000m")
-SANDBOX_POD_MEMORY_LIMIT = os.environ.get("SANDBOX_POD_MEMORY_LIMIT", "10Gi")
+# Sandbox pod resource sizing is owned by the Helm chart's sandbox-pod
+# PodTemplate (deployment/.../templates/sandbox-podtemplate.yaml), which reads
+# the configMap.SANDBOX_POD_* keys. CI overrides them in values-ci.yaml for the
+# 4 vCPU kind runner; prod uses the chart defaults.
 
 # ==============================================================================
 # Sandbox egress proxy
