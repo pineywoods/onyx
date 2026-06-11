@@ -310,6 +310,20 @@ def test_snapshot_storage_credentials_are_not_in_pod_env(pod: client.V1Pod) -> N
         )
 
 
+def test_all_containers_set_ephemeral_storage_requests(pod: client.V1Pod) -> None:
+    """A pod with no ephemeral-storage request is invisible to the scheduler's
+    disk accounting and first in line for kubelet eviction under node disk
+    pressure — the exact failure that loses un-snapshotted workspaces."""
+    for name in ("sandbox", "sidecar"):
+        resources = _container(pod, name).resources
+        assert "ephemeral-storage" in (resources.requests or {}), (
+            f"{name} container missing ephemeral-storage request"
+        )
+        assert "ephemeral-storage" in (resources.limits or {}), (
+            f"{name} container missing ephemeral-storage limit"
+        )
+
+
 def test_proxy_init_container_present(pod: client.V1Pod) -> None:
     """The iptables-lockdown initContainer must run before any user code —
     it's what blocks direct egress that the HTTPS_PROXY env doesn't catch."""
