@@ -22,6 +22,10 @@ Builds on the CONTRIBUTING.md prereqs (Python 3.13, uv, Node.js 22, the venv,
 `.vscode/.env`). Docker Desktop must be running with at least 8 CPU / 16 GB
 allocated.
 
+Craft's Kubernetes sandbox backend requires Kubernetes 1.33 or newer. The API
+server checks the cluster version when the Kubernetes sandbox manager
+initializes and raises if the server is older.
+
 ```bash
 brew install kind helm kubectl
 

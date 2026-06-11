@@ -134,6 +134,11 @@ It is the only backend currently advertising:
 supports_opencode_history_persistence = True
 ```
 
+The Kubernetes sandbox backend requires Kubernetes 1.33 or newer. The manager
+checks the server version during initialization and raises a clear error on
+older clusters instead of carrying compatibility branches for pre-1.33
+behavior.
+
 ## Provision And Restore Flow
 
 When a Kubernetes sandbox is provisioned or reused:
