@@ -293,6 +293,8 @@ def test_health_check_returns_false_when_sandbox_container_terminated() -> None:
                 running=None, terminated=SimpleNamespace(reason="OOMKilled")
             ),
         ),
+    ]
+    pod.status.init_container_statuses = [
         SimpleNamespace(
             name="sidecar",
             ready=True,

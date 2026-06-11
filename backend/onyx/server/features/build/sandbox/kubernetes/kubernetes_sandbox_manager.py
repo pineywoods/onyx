@@ -641,7 +641,7 @@ class KubernetesSandboxManager(SandboxManager):
         missing the expected container) as an opaque ``StopIteration``; this
         names the container and the fix, matching the 404 PodTemplate error.
         """
-        for container in spec.containers or []:
+        for container in list(spec.containers or []) + list(spec.init_containers or []):
             if container.name == name:
                 return container
         raise RuntimeError(
