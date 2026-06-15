@@ -43,6 +43,9 @@ from onyx.tools.tool_implementations.images.image_generation_tool import (
 )
 from onyx.tools.tool_implementations.mcp.mcp_tool import MCPTool
 from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
+from onyx.tools.tool_implementations.docker_status.docker_status_tool import (
+    DockerStatusTool,
+)
 from onyx.tools.tool_implementations.open_url.open_url_tool import OpenURLTool
 from onyx.tools.tool_implementations.python.python_tool import PythonTool
 from onyx.tools.tool_implementations.search.search_tool import SearchTool
@@ -304,6 +307,12 @@ def _construct_tools_impl(
             elif tool_cls.__name__ == PythonTool.__name__:
                 tool_dict[db_tool_model.id] = [
                     PythonTool(tool_id=db_tool_model.id, emitter=emitter)
+                ]
+
+            # Handle Docker Status Tool
+            elif tool_cls.__name__ == DockerStatusTool.__name__:
+                tool_dict[db_tool_model.id] = [
+                    DockerStatusTool(tool_id=db_tool_model.id, emitter=emitter)
                 ]
 
             # Handle Coding Agent Tool

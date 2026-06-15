@@ -87,6 +87,9 @@ services:
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
       - S3_AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID:-minioadmin}
       - S3_AWS_SECRET_ACCESS_KEY=${S3_AWS_SECRET_ACCESS_KEY:-minioadmin}
+      # LOCAL-ONLY: the DockerStatusTool reaches the daemon only through the
+      # read-only docker-socket-proxy sidecar; api_server never mounts the raw socket.
+      - DOCKER_HOST=${DOCKER_HOST:-tcp://docker-socket-proxy:2375}
       # Onyx Craft configuration (disabled by default, set ENABLE_CRAFT=true in .env to enable)
       # Use --include-craft with install script, or manually set in .env file
       - ENABLE_CRAFT=${ENABLE_CRAFT:-false}
@@ -548,6 +551,26 @@ services:
 
     # uncomment below + comment out the above to use the `docker-in-docker` execution mode
     # privileged: true
+
+  # LOCAL-ONLY: read-only Docker API proxy that backs the DockerStatusTool.
+  # CONTAINERS=1 grants GET /containers/json (list) and /version (the SDK ping);
+  # every other section defaults to 0 (denied) and POST is disabled, so even a
+  # fully abused tool can only list containers. api_server talks to this over the
+  # compose network via DOCKER_HOST; it never touches the raw socket itself.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - VERSION=1
+      - POST=0
+    volumes:
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # PRODUCTION: Uncomment the following certbot service for SSL certificate management
   # certbot:

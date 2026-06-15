@@ -64,6 +64,8 @@ class StreamingType(Enum):
     BASH_TOOL_START = "bash_tool_start"
     BASH_TOOL_DELTA = "bash_tool_delta"
 
+    DOCKER_STATUS_START = "docker_status_start"
+
 
 class BaseObj(BaseModel):
     type: str = ""
@@ -429,6 +431,13 @@ class BashToolDelta(BaseObj):
 
 
 ################################################
+# Docker Status Tool Packets
+################################################
+class DockerStatusStart(BaseObj):
+    type: Literal["docker_status_start"] = StreamingType.DOCKER_STATUS_START.value
+
+
+################################################
 # Packet Object
 ################################################
 # Discriminated union of all possible packet object types
@@ -485,6 +494,8 @@ PacketObj = Union[
     # Bash Tool Packets
     BashToolStart,
     BashToolDelta,
+    # Docker Status Tool Packets
+    DockerStatusStart,
 ]
 
 
