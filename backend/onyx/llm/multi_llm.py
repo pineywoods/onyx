@@ -777,7 +777,18 @@ class LitellmLLM(LLM):
             # Only pass tool_choice when tools are present — some providers (e.g. Fireworks)
             # reject requests where tool_choice is explicitly null.
             if tools and tool_choice is not None:
-                optional_kwargs["tool_choice"] = tool_choice
+                if tool_choice == ToolChoiceOptions.REQUIRED and len(tools) == 1:
+                    # Generic "required" is a *soft* constraint on vLLM-served
+                    # models: the model can still emit a refusal instead of a tool
+                    # call (~10% on borderline prompts). Pinning the single forced
+                    # tool by name triggers strict guided decoding, so the tool
+                    # call is guaranteed. Multi-tool REQUIRED keeps the enum.
+                    optional_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": tools[0]["function"]["name"]},
+                    }
+                else:
+                    optional_kwargs["tool_choice"] = tool_choice
 
             with temporary_env_and_lock(self._custom_config or {}):
                 response = litellm.completion(
