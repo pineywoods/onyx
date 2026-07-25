@@ -317,7 +317,10 @@ def categorize_uploaded_files(
                     break_on_unprocessable=False,
                     extension=extension,
                 )
-                if not text_content:
+                # Whitespace-only extraction (e.g. a scan yielding one newline
+                # per page) carries no content but is truthy, so strip before
+                # testing or the file indexes as an empty document.
+                if not text_content.strip():
                     # Documents with embedded images (e.g. scans) have no
                     # extractable text but can still be indexed via the
                     # vision-LLM captioning path when image analysis is
