@@ -31,7 +31,7 @@ import {
 import { CRAFT_SEARCH_PARAM_NAMES } from "@/app/craft/services/searchParams";
 import { CRAFT_PATH } from "@/app/craft/v1/constants";
 import { isScheduledRunContextInFlight } from "@/app/craft/v1/tasks/utils";
-import { toast } from "@/hooks/useToast";
+import { toast } from "@opal/layouts";
 import Dropzone from "react-dropzone";
 import CraftInputBar, {
   CraftInputBarHandle,
@@ -40,7 +40,9 @@ import ModelPickerButton from "@/app/craft/components/ModelPickerButton";
 import { useLLMProviders } from "@/lib/languageModels/hooks";
 import {
   BuildLlmSelection,
+  getDefaultLlmSelection,
   hasSupportedCraftProvider,
+  resolveSessionLlmSelection,
 } from "@/app/craft/onboarding/constants";
 import ScheduledRunBanner, {
   useScheduledRunContext,
@@ -52,6 +54,7 @@ import AgentSwitcher from "@/app/craft/components/AgentSwitcher";
 import SubagentView from "@/app/craft/components/SubagentView";
 import SandboxStatusIndicator from "@/app/craft/components/SandboxStatusIndicator";
 import SandboxAsleepNotice from "@/app/craft/components/SandboxAsleepNotice";
+import SkillsStaleNotice from "@/app/craft/components/SkillsStaleNotice";
 import UpgradePlanModal from "@/app/craft/components/UpgradePlanModal";
 import IconButton from "@/refresh-components/buttons/IconButton";
 import { SvgSidebar, SvgChevronDown, SvgStopCircle } from "@opal/icons";
@@ -107,22 +110,22 @@ export default function BuildChatPanel({
   const hasProvider = hasSupportedCraftProvider(llmProviders);
   // Picker shows the session's stored model unless the user picks another.
   // The pick is keyed by session so it can't leak across sessions.
-  const sessionModel = useMemo<BuildLlmSelection | null>(() => {
-    if (!session?.agentProvider || !session?.agentModel) return null;
-    const match = llmProviders?.find(
-      (p) => p.provider === session.agentProvider
-    );
-    return {
-      provider: session.agentProvider,
-      providerName: match?.name ?? session.agentProvider,
-      modelName: session.agentModel,
-    };
-  }, [session?.agentProvider, session?.agentModel, llmProviders]);
+  const sessionModel = useMemo<BuildLlmSelection | null>(
+    () =>
+      resolveSessionLlmSelection(
+        session?.agentProvider,
+        session?.agentModel,
+        llmProviders
+      ),
+    [session?.agentProvider, session?.agentModel, llmProviders]
+  );
   const [modelBySession, setModelBySession] = useState<
     Record<string, BuildLlmSelection>
   >({});
   const selectedModel =
-    (sessionId ? modelBySession[sessionId] : undefined) ?? sessionModel;
+    (sessionId ? modelBySession[sessionId] : undefined) ??
+    sessionModel ??
+    getDefaultLlmSelection(llmProviders);
 
   const contextUsage = useMemo(() => {
     const usage = session?.contextUsage;
@@ -130,7 +133,7 @@ export default function BuildChatPanel({
     let limit: number | null = null;
     if (selectedModel) {
       const provider = llmProviders?.find(
-        (p) => p.provider === selectedModel.provider
+        (candidate) => candidate.id === selectedModel.providerId
       );
       const config = provider?.model_configurations.find(
         (m) => m.name === selectedModel.modelName
@@ -443,9 +446,6 @@ export default function BuildChatPanel({
       track(AnalyticsEvent.SENT_CRAFT_MESSAGE);
 
       const chosen = modelOverride ?? selectedModel;
-      const model = chosen
-        ? { provider: chosen.provider, modelName: chosen.modelName }
-        : null;
 
       if (hasSession && sessionId) {
         // Existing session flow
@@ -463,7 +463,7 @@ export default function BuildChatPanel({
           timestamp: new Date(),
         });
         // Stream the response
-        await streamMessage(sessionId, message, model);
+        await streamMessage(sessionId, message, chosen);
         refreshLimits();
       } else {
         // New session flow - ALWAYS use pre-provisioned session
@@ -537,7 +537,7 @@ export default function BuildChatPanel({
         setTimeout(() => nameBuildSession(newSessionId), 1000);
 
         // Stream the response (uses session ID directly, not currentSessionId)
-        await streamMessage(newSessionId, message, model);
+        await streamMessage(newSessionId, message, chosen);
         refreshLimits();
       }
     },
@@ -778,6 +778,14 @@ export default function BuildChatPanel({
                   )}
                   {/* Model is locked once the session starts — show the picker
                   only before the first message. */}
+                  {sessionId && session?.skillsStale && (
+                    <div className="pb-2">
+                      <SkillsStaleNotice
+                        sessionId={sessionId}
+                        turnActive={isRunning}
+                      />
+                    </div>
+                  )}
                   {session?.isLoaded && session.messages.length === 0 && (
                     <div className="flex justify-end pb-2">
                       <ModelPickerButton

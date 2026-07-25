@@ -8,13 +8,14 @@ export function builtinFixture(over: Partial<BuiltinSkill> = {}): BuiltinSkill {
   return {
     source: "builtin",
     id: "builtin-1",
-    slug: "pptx",
-    name: "PPTX",
+    name: "pptx",
     description: "Build PowerPoint decks.",
     is_available: true,
     unavailable_reason: null,
+    is_valid: true,
     is_personal: false,
-    enabled: null,
+    enabled: true,
+    can_toggle: false,
     author_user_id: null,
     author_email: null,
     owner: null,
@@ -25,6 +26,7 @@ export function builtinFixture(over: Partial<BuiltinSkill> = {}): BuiltinSkill {
     group_shares: [],
     public_permission: null,
     user_permission: "VIEWER",
+    external_app: null,
     ...over,
   };
 }
@@ -33,13 +35,14 @@ export function customFixture(over: Partial<CustomSkill> = {}): CustomSkill {
   return {
     source: "custom",
     id: "custom-1",
-    slug: "report-writer",
-    name: "Report Writer",
+    name: "report-writer",
     description: "Draft a structured report from notes.",
     is_available: null,
     unavailable_reason: null,
+    is_valid: true,
     is_personal: false,
     enabled: true,
+    can_toggle: true,
     author_user_id: null,
     author_email: null,
     owner: null,
@@ -50,6 +53,7 @@ export function customFixture(over: Partial<CustomSkill> = {}): CustomSkill {
     group_shares: [],
     public_permission: "VIEWER",
     user_permission: "VIEWER",
+    external_app: null,
     ...over,
   };
 }
@@ -57,13 +61,11 @@ export function customFixture(over: Partial<CustomSkill> = {}): CustomSkill {
 export function appFixture(
   over: Partial<ExternalAppUserResponse> & {
     app_type: ExternalAppType;
-    slug: string;
+    id: number;
   }
 ): ExternalAppUserResponse {
   return {
-    id: over.slug.length,
-    name: over.slug,
-    description: `${over.slug} integration`,
+    name: `App ${over.id}`,
     credential_keys: ["token"],
     credential_values: over.authenticated === false ? {} : { token: "***" },
     authenticated: true,

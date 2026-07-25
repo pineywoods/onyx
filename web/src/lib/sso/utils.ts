@@ -1,7 +1,7 @@
 import { SvgGlobe, SvgUserKey } from "@opal/icons";
 import { SvgGoogle } from "@opal/logos";
 import type { IconFunctionComponent } from "@opal/types";
-import { toast } from "@/hooks/useToast";
+import { toast } from "@opal/layouts";
 import { SSOProviderType } from "@/lib/sso/interfaces";
 
 interface SSOProviderDetail {
@@ -36,11 +36,11 @@ export const CREATABLE_SSO_PROVIDER_TYPES: SSOProviderType[] = [
   "SAML",
 ];
 
-export type SSOConfigFieldKind = "text" | "textarea" | "password";
+export type SSOConfigFieldKind = "text" | "textarea" | "password" | "switch";
 
-// One entry per key in a provider type's backend config model. `name` must
-// match the backend config field exactly, since values are sent as
-// config.<name>.
+// One entry per admin-editable key in a provider type's backend config model.
+// `name` must match the backend config field exactly, since values are sent
+// as config.<name>.
 export interface SSOConfigField {
   name: string;
   label: string;
@@ -77,6 +77,15 @@ export const CONFIG_FIELDS_BY_TYPE: Record<SSOProviderType, SSOConfigField[]> =
         kind: "text",
         description: "The IdP's OpenID Connect discovery document URL.",
         placeholder: "https://example.com/.well-known/openid-configuration",
+      },
+      {
+        name: "require_verified_email",
+        label: "Require Verified Email Claim",
+        kind: "switch",
+        description:
+          "Reject sign-ins when the IdP omits the optional email_verified " +
+          "claim. Leave off for IdPs that do not send it, such as " +
+          "Microsoft Entra ID.",
       },
     ],
     SAML: [

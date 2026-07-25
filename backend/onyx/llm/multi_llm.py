@@ -1,78 +1,74 @@
 import copy
 import os
 import re
-import threading
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any
-from typing import cast
-from typing import TYPE_CHECKING
-from typing import Union
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Union, cast
 
-from onyx.configs.app_configs import MOCK_LLM_RESPONSE
-from onyx.configs.app_configs import SEND_USER_METADATA_TO_LLM_PROVIDER
-from onyx.configs.chat_configs import LLM_FIRST_CHUNK_MAX_RETRIES
-from onyx.configs.chat_configs import LLM_SOCKET_READ_TIMEOUT
-from onyx.configs.model_configs import GEN_AI_TEMPERATURE
-from onyx.configs.model_configs import LITELLM_EXTRA_BODY
+from readerwriterlock import rwlock
+
+from onyx.configs.app_configs import (
+    MOCK_LLM_RESPONSE,
+    SEND_USER_METADATA_TO_LLM_PROVIDER,
+)
+from onyx.configs.chat_configs import (
+    LLM_FIRST_CHUNK_MAX_RETRIES,
+    LLM_SOCKET_READ_TIMEOUT,
+)
+from onyx.configs.model_configs import GEN_AI_TEMPERATURE, LITELLM_EXTRA_BODY
 from onyx.llm.constants import LlmProviderNames
-from onyx.llm.cost import calculate_llm_cost_cents
-from onyx.llm.interfaces import LanguageModelInput
-from onyx.llm.interfaces import LLM
-from onyx.llm.interfaces import LLMConfig
-from onyx.llm.interfaces import LLMUserIdentity
-from onyx.llm.interfaces import ReasoningEffort
-from onyx.llm.interfaces import ToolChoiceOptions
-from onyx.llm.model_response import ModelResponse
-from onyx.llm.model_response import ModelResponseStream
-from onyx.llm.model_response import Usage
-from onyx.llm.models import ANTHROPIC_ADAPTIVE_REASONING_EFFORT
-from onyx.llm.models import ANTHROPIC_REASONING_EFFORT_BUDGET
-from onyx.llm.models import OPENAI_REASONING_EFFORT
+from onyx.llm.cost import compute_cost_cents
+from onyx.llm.custom_config_mapping import (
+    UI_ONLY_CONFIG_KEYS,
+    map_custom_config_to_model_kwargs,
+)
+from onyx.llm.interfaces import (
+    LLM,
+    LanguageModelInput,
+    LLMConfig,
+    LLMUserIdentity,
+    ReasoningEffort,
+    ToolChoiceOptions,
+)
+from onyx.llm.model_capabilities import (
+    is_true_openai_model,
+    model_is_reasoning_model,
+    openai_model_rejects_reasoning_effort,
+)
+from onyx.llm.model_response import ModelResponse, ModelResponseStream, Usage
+from onyx.llm.models import (
+    ANTHROPIC_ADAPTIVE_REASONING_EFFORT,
+    ANTHROPIC_REASONING_EFFORT_BUDGET,
+    OPENAI_REASONING_EFFORT,
+)
 from onyx.llm.request_context import get_llm_mock_response
 from onyx.llm.utils import build_litellm_passthrough_kwargs
-from onyx.llm.utils import is_true_openai_model
-from onyx.llm.utils import model_is_reasoning_model
-from onyx.llm.well_known_providers.constants import AWS_ACCESS_KEY_ID_KWARG
-from onyx.llm.well_known_providers.constants import (
-    AWS_ACCESS_KEY_ID_KWARG_ENV_VAR_FORMAT,
-)
-from onyx.llm.well_known_providers.constants import (
-    AWS_BEARER_TOKEN_BEDROCK_KWARG_ENV_VAR_FORMAT,
-)
-from onyx.llm.well_known_providers.constants import AWS_REGION_NAME_KWARG
-from onyx.llm.well_known_providers.constants import AWS_REGION_NAME_KWARG_ENV_VAR_FORMAT
-from onyx.llm.well_known_providers.constants import AWS_SECRET_ACCESS_KEY_KWARG
-from onyx.llm.well_known_providers.constants import (
-    AWS_SECRET_ACCESS_KEY_KWARG_ENV_VAR_FORMAT,
-)
-from onyx.llm.well_known_providers.constants import LM_STUDIO_API_KEY_CONFIG_KEY
-from onyx.llm.well_known_providers.constants import OLLAMA_API_KEY_CONFIG_KEY
-from onyx.llm.well_known_providers.constants import VERTEX_AUTH_METHOD_KWARG
-from onyx.llm.well_known_providers.constants import VERTEX_AUTH_METHOD_WORKLOAD_IDENTITY
-from onyx.llm.well_known_providers.constants import VERTEX_CREDENTIALS_FILE_KWARG
-from onyx.llm.well_known_providers.constants import (
-    VERTEX_CREDENTIALS_FILE_KWARG_ENV_VAR_FORMAT,
-)
 from onyx.llm.well_known_providers.constants import VERTEX_LOCATION_KWARG
-from onyx.llm.well_known_providers.constants import VERTEX_PROJECT_KWARG
-from onyx.utils.encryption import mask_env_value_for_logging
-from onyx.utils.encryption import mask_string
+from onyx.utils.encryption import mask_env_value_for_logging, mask_string
 from onyx.utils.logger import setup_logger
-from onyx.utils.timing import log_generator_function_time
 
 logger = setup_logger()
 
-_env_lock = threading.Lock()
+# Write-preferring reader-writer lock guarding os.environ during litellm calls.
+# Calls that inject custom_config env vars hold the write lock; all other calls
+# hold a read lock so they never observe injected secrets but still run
+# concurrently with each other.
+_env_rwlock = rwlock.RWLockWrite()
 
 if TYPE_CHECKING:
-    from litellm import CustomStreamWrapper
-    from litellm import HTTPHandler
+    from litellm import CustomStreamWrapper, HTTPHandler
 
 
 _LLM_PROMPT_LONG_TERM_LOG_CATEGORY = "llm_prompt"
 LEGACY_MAX_TOKENS_KWARG = "max_tokens"
 STANDARD_MAX_TOKENS_KWARG = "max_completion_tokens"
+
+# Azure api-versions that route to the modern /openai/v1/* surface. Mirrors
+# LiteLLM's BaseAzureLLM._is_azure_v1_api_version.
+_AZURE_V1_API_VERSIONS = frozenset({"preview", "latest", "v1"})
+
 _VERTEX_ANTHROPIC_MODELS_REJECTING_OUTPUT_CONFIG = (
     "claude-opus-4-5",
     "claude-opus-4-6",
@@ -90,6 +86,36 @@ _VERTEX_ANTHROPIC_MODELS_REJECTING_OUTPUT_CONFIG = (
 # avoids relying on LiteLLM's drop_params (unreliable here, since AnthropicConfig
 # still advertises temperature as supported).
 _ANTHROPIC_ADAPTIVE_THINKING_MIN_VERSION = (4, 7)
+
+# Best-effort tuning kwargs, never worth failing a chat over. _completion
+# retries provider rejections without them: reasoning keys first, then all.
+# Semantics-changing keys (tools, tool_choice, messages) are never stripped.
+_REASONING_KWARG_KEYS = frozenset(
+    {"thinking", "output_config", "reasoning", "reasoning_effort"}
+)
+_BEST_EFFORT_KWARG_KEYS = _REASONING_KWARG_KEYS | frozenset({"temperature"})
+
+# Substrings provider 400s use to name each strippable kwarg (errors may
+# cite only inner fields like budget_tokens or effort).
+_KWARG_ERROR_ALIASES: dict[str, tuple[str, ...]] = {
+    "thinking": ("thinking", "budget_tokens"),
+    "output_config": ("output_config", "effort"),
+    "reasoning": ("reasoning", "effort"),
+    "reasoning_effort": ("reasoning_effort", "effort"),
+    "temperature": ("temperature",),
+}
+
+
+def _rejection_names_strippable_kwargs(error: Exception, strippable: set[str]) -> bool:
+    """True when the 400's message names a kwarg a later attempt would drop.
+    Unrelated 400s (context length, malformed input) must not be retried."""
+    message = str(error).lower()
+    return any(
+        alias in message
+        for key in strippable
+        for alias in _KWARG_ERROR_ALIASES.get(key, (key,))
+    )
+
 
 # Named tiers spanning Claude's naming schemes, including the Claude 5 line whose
 # version digit can precede or follow the tier ("claude-sonnet-5" vs
@@ -250,6 +276,24 @@ def _prompt_contains_tool_call_history(prompt: LanguageModelInput) -> bool:
     return any(isinstance(msg, AssistantMessage) and msg.tool_calls for msg in msgs)
 
 
+@lru_cache(maxsize=None)
+def _log_azure_responses_api_version_override(
+    api_base: str | None, configured_api_version: str
+) -> None:
+    """Log once per provider config per process (LLM instances and calls are
+    per-request, so unconditional logging here would fire on every LLM call)."""
+    logger.warning(
+        "Azure responses API calls for %s ignore the configured api_version %s: "
+        "dated api-versions target the legacy /openai/responses surface, which "
+        "some clouds (e.g. Azure Government) do not serve. These calls use "
+        "LiteLLM's responses default instead (AZURE_DEFAULT_RESPONSES_API_VERSION, "
+        "default 'preview'); the configured version still applies to "
+        "chat-completions calls.",
+        api_base,
+        configured_api_version,
+    )
+
+
 def _is_vertex_model_rejecting_output_config(model_name: str) -> bool:
     normalized_model_name = model_name.lower()
     return any(
@@ -307,6 +351,25 @@ def _anthropic_omits_sampling_params(model_name: str) -> bool:
     return version is not None and version >= _ANTHROPIC_ADAPTIVE_THINKING_MIN_VERSION
 
 
+def _env_injection_enabled() -> bool:
+    # Deferred import: the security store pulls in the DB layer, which this
+    # module must not import at module load.
+    from onyx.server.security.store import llm_custom_config_env_injection_enabled
+
+    return llm_custom_config_env_injection_enabled()
+
+
+def _warn_dropped_env_only_keys(
+    model_provider: str, dropped_keys: tuple[str, ...]
+) -> None:
+    logger.warning(
+        "Dropping custom_config key(s) with no LiteLLM kwarg equivalent for "
+        "provider %s (env injection is disabled on this deployment): %s",
+        model_provider,
+        list(dropped_keys),
+    )
+
+
 class LitellmLLM(LLM):
     """Uses Litellm library to allow easy configuration to use a multitude of LLMs
     See https://python.langchain.com/docs/integrations/chat/litellm"""
@@ -352,51 +415,23 @@ class LitellmLLM(LLM):
         # Create a dictionary for model-specific arguments if it's None
         model_kwargs = model_kwargs or {}
 
-        vertex_auth_method = (
-            (custom_config or {}).get(VERTEX_AUTH_METHOD_KWARG)
-            if model_provider == LlmProviderNames.VERTEX_AI
-            else None
+        custom_config_mapping = map_custom_config_to_model_kwargs(
+            model_provider=model_provider,
+            custom_config=custom_config,
+            api_key=api_key,
+            api_base=api_base,
         )
-        vertex_is_workload_identity = (
-            vertex_auth_method == VERTEX_AUTH_METHOD_WORKLOAD_IDENTITY
-        )
-
-        if custom_config:
-            for k, v in custom_config.items():
-                if model_provider == LlmProviderNames.VERTEX_AI:
-                    # In Workload Identity mode, omit vertex_credentials so LiteLLM
-                    # falls back to google.auth.default() (the GKE metadata server).
-                    if k == VERTEX_CREDENTIALS_FILE_KWARG:
-                        if not vertex_is_workload_identity:
-                            model_kwargs[k] = v
-                    elif k == VERTEX_CREDENTIALS_FILE_KWARG_ENV_VAR_FORMAT:
-                        if not vertex_is_workload_identity:
-                            model_kwargs[VERTEX_CREDENTIALS_FILE_KWARG] = v
-                    elif k == VERTEX_LOCATION_KWARG:
-                        model_kwargs[k] = v
-                    elif k == VERTEX_PROJECT_KWARG:
-                        model_kwargs[k] = v
-                elif model_provider == LlmProviderNames.OLLAMA_CHAT:
-                    if k == OLLAMA_API_KEY_CONFIG_KEY:
-                        model_kwargs["api_key"] = v
-                elif model_provider == LlmProviderNames.LM_STUDIO:
-                    if k == LM_STUDIO_API_KEY_CONFIG_KEY:
-                        model_kwargs["api_key"] = v
-                elif model_provider == LlmProviderNames.BEDROCK:
-                    if k == AWS_REGION_NAME_KWARG:
-                        model_kwargs[k] = v
-                    elif k == AWS_REGION_NAME_KWARG_ENV_VAR_FORMAT:
-                        model_kwargs[AWS_REGION_NAME_KWARG] = v
-                    elif k == AWS_BEARER_TOKEN_BEDROCK_KWARG_ENV_VAR_FORMAT:
-                        model_kwargs["api_key"] = v
-                    elif k == AWS_ACCESS_KEY_ID_KWARG:
-                        model_kwargs[k] = v
-                    elif k == AWS_ACCESS_KEY_ID_KWARG_ENV_VAR_FORMAT:
-                        model_kwargs[AWS_ACCESS_KEY_ID_KWARG] = v
-                    elif k == AWS_SECRET_ACCESS_KEY_KWARG:
-                        model_kwargs[k] = v
-                    elif k == AWS_SECRET_ACCESS_KEY_KWARG_ENV_VAR_FORMAT:
-                        model_kwargs[AWS_SECRET_ACCESS_KEY_KWARG] = v
+        model_kwargs.update(custom_config_mapping.model_kwargs)
+        # Keys with no LiteLLM kwarg equivalent. Injected into os.environ during
+        # the call on deployments that allow it; dropped (with a warning at call
+        # time) otherwise. UI-only form-state keys are neither injected nor
+        # warned about.
+        self._env_only_custom_config: dict[str, str] = {
+            k: v
+            for k, v in (custom_config or {}).items()
+            if k not in custom_config_mapping.consumed_keys
+            and k not in UI_ONLY_CONFIG_KEYS
+        }
 
         # LM Studio: LiteLLM defaults to "fake-api-key" when no key is provided,
         # which LM Studio rejects. Ensure we always pass an explicit key (or empty
@@ -481,21 +516,26 @@ class LitellmLLM(LLM):
             return
         # Import here to avoid circular imports
         from onyx.db.engine.sql_engine import get_session_with_current_tenant
-        from onyx.db.usage import increment_usage
-        from onyx.db.usage import UsageType
+        from onyx.db.usage import UsageType, increment_usage
 
-        # Calculate cost in cents
-        cost_cents = calculate_llm_cost_cents(
-            model_name=self._model_version,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-        )
-
-        if cost_cents <= 0:
-            return
+        cache_read = usage.cache_read_input_tokens
+        # prompt_tokens is cache-inclusive; price non-cached + cache separately.
+        non_cached_input = max(usage.prompt_tokens - cache_read, 0)
+        provider = self._custom_llm_provider or self._model_provider
 
         try:
             with get_session_with_current_tenant() as db_session:
+                input_cents, output_cents = compute_cost_cents(
+                    self._model_version,
+                    provider,
+                    non_cached_input,
+                    usage.completion_tokens,
+                    cache_read_tokens=cache_read,
+                    db_session=db_session,
+                )
+                cost_cents = input_cents + output_cents
+                if cost_cents <= 0:
+                    return
                 increment_usage(db_session, UsageType.LLM_COST, cost_cents)
                 db_session.commit()
         except Exception as e:
@@ -517,8 +557,7 @@ class LitellmLLM(LLM):
         client: "HTTPHandler | None" = None,
     ) -> Union["ModelResponse", "CustomStreamWrapper"]:
         # Lazy loading to avoid memory bloat for non-inference flows
-        from litellm.exceptions import RateLimitError
-        from litellm.exceptions import Timeout
+        from litellm.exceptions import BadRequestError, RateLimitError, Timeout
 
         from onyx.llm.litellm_singleton import litellm
 
@@ -562,6 +601,25 @@ class LitellmLLM(LLM):
             if is_openai_model  # Uses litellm's completions -> responses bridge
             else self.config.model_provider
         )
+
+        # Azure responses-bridge calls must target the v1 responses surface:
+        # with a dated api-version, LiteLLM builds the legacy /openai/responses
+        # URL, which sovereign clouds (e.g. Azure Government) do not serve
+        # (#11420). Dropping the dated version lets LiteLLM apply its responses
+        # default (AZURE_DEFAULT_RESPONSES_API_VERSION env var, default
+        # "preview"), which routes to /openai/v1/responses — working on all
+        # clouds with reasoning summaries intact. Admin-configured v1 versions
+        # ("preview"/"latest"/"v1") pass through, and the dated version still
+        # applies to every non-bridge call (e.g. Azure chat completions).
+        api_version = self._api_version or None
+        if (
+            is_openai_model
+            and self._model_provider == LlmProviderNames.AZURE
+            and api_version is not None
+            and api_version not in _AZURE_V1_API_VERSIONS
+        ):
+            _log_azure_responses_api_version_override(self._api_base, api_version)
+            api_version = None
         if is_openai_compatible_proxy:
             # OpenAI-compatible proxies (Bifrost, generic OpenAI-compatible
             # servers) expect model names sent directly to their endpoint.
@@ -610,6 +668,7 @@ class LitellmLLM(LLM):
             # The default of this parameter not set is surprisingly not the equivalent of an Auto but is actually Off
             and reasoning_effort != ReasoningEffort.OFF
             and not is_vertex_model_rejecting_output_config
+            and not openai_model_rejects_reasoning_effort(self.config.model_name)
         ):
             if is_openai_model:
                 # OpenAI API does not accept reasoning params for GPT 5 chat models
@@ -670,6 +729,10 @@ class LitellmLLM(LLM):
                     ReasoningEffort.HIGH,
                 ]:
                     optional_kwargs["reasoning_effort"] = reasoning_effort.value
+                elif reasoning_effort is ReasoningEffort.XHIGH:
+                    # Provider mappings behind litellm's reasoning_effort are
+                    # uneven (Gemini raises on xhigh), clamp to high.
+                    optional_kwargs["reasoning_effort"] = ReasoningEffort.HIGH.value
                 else:
                     optional_kwargs["reasoning_effort"] = ReasoningEffort.MEDIUM.value
 
@@ -790,23 +853,67 @@ class LitellmLLM(LLM):
                 else:
                     optional_kwargs["tool_choice"] = tool_choice
 
-            with temporary_env_and_lock(self._custom_config or {}):
-                response = litellm.completion(
-                    mock_response=get_llm_mock_response() or MOCK_LLM_RESPONSE,
-                    model=model,
-                    base_url=self._api_base or None,
-                    api_version=self._api_version or None,
-                    custom_llm_provider=self._custom_llm_provider or None,
-                    messages=messages,
-                    tools=tools,
-                    stream=stream,
-                    timeout=timeout_override or self._timeout,
-                    max_tokens=max_tokens,
-                    client=client,
-                    **optional_kwargs,
-                    **passthrough_kwargs,
+            if not _env_injection_enabled() and self._env_only_custom_config:
+                _warn_dropped_env_only_keys(
+                    self._model_provider,
+                    tuple(sorted(self._env_only_custom_config)),
                 )
-            return response
+
+            def _call_litellm(opts: dict[str, Any]) -> Any:
+                # Injection disabled means no env writer exists anywhere in
+                # the process, so skip the rwlock entirely. Built per attempt
+                # because the context manager is single-use.
+                env_ctx: AbstractContextManager[None] = (
+                    temporary_env_and_lock(self._env_only_custom_config)
+                    if _env_injection_enabled()
+                    else nullcontext()
+                )
+                with env_ctx:
+                    return litellm.completion(
+                        mock_response=get_llm_mock_response() or MOCK_LLM_RESPONSE,
+                        model=model,
+                        base_url=self._api_base or None,
+                        api_version=api_version,
+                        custom_llm_provider=self._custom_llm_provider or None,
+                        messages=messages,
+                        tools=tools,
+                        stream=stream,
+                        timeout=timeout_override or self._timeout,
+                        max_tokens=max_tokens,
+                        client=client,
+                        **opts,
+                        **passthrough_kwargs,
+                    )
+
+            # Retry ladder for provider 400s: drop reasoning kwargs, then every
+            # best-effort kwarg. Unknown models or capability drift degrade to
+            # provider defaults with a warning instead of failing the message.
+            attempts = [optional_kwargs]
+            for strip_keys in (_REASONING_KWARG_KEYS, _BEST_EFFORT_KWARG_KEYS):
+                stripped = {
+                    k: v for k, v in optional_kwargs.items() if k not in strip_keys
+                }
+                if len(stripped) < len(attempts[-1]):
+                    attempts.append(stripped)
+
+            for i, opts in enumerate(attempts):
+                try:
+                    return _call_litellm(opts)
+                except BadRequestError as e:
+                    if i == len(attempts) - 1:
+                        raise
+                    # Only retry rejections a later attempt can strip away.
+                    remaining_strippable = set(opts) - set(attempts[-1])
+                    if not _rejection_names_strippable_kwargs(e, remaining_strippable):
+                        raise
+                    logger.warning(
+                        "Provider rejected request for model %s. Retrying "
+                        "without %s: %s",
+                        model,
+                        sorted(set(opts) - set(attempts[i + 1])),
+                        e,
+                    )
+            raise RuntimeError("unreachable: retry ladder always returns or raises")
         except Exception as e:
             # for break pointing
             if isinstance(e, Timeout):
@@ -829,6 +936,14 @@ class LitellmLLM(LLM):
             deployment_name=self._deployment_name,
             custom_config=self._custom_config,
             max_input_tokens=self._max_input_tokens,
+        )
+
+    def _uses_isolated_client(self) -> bool:
+        """Providers whose sync calls need a fresh per-call HTTPHandler instead of
+        litellm's shared module_level_client (see threading notes in invoke())."""
+        return (
+            is_true_openai_model(self.config.model_provider, self.config.model_name)
+            or self.config.model_provider == LlmProviderNames.ANTHROPIC
         )
 
     def invoke(
@@ -866,11 +981,12 @@ class LitellmLLM(LLM):
         #      corrupt the pool state for other threads
         #    - Each request gets its own fresh httpx.Client via HTTPHandler
         #
-        # 3. WHY OTHER PROVIDERS DON'T NEED THIS:
-        #    - Other providers (Anthropic, Bedrock, etc.) use litellm.module_level_client
-        #      which handles concurrency appropriately
-        #    - httpx.Client itself IS thread-safe for concurrent requests
-        #    - The issue is specific to OpenAI's responses API path and connection reuse
+        # 3. WHY ANTHROPIC ALSO GETS AN ISOLATED CLIENT:
+        #    - An abandoned sync stream is finalized by GC, which can fire on a thread
+        #      already inside the shared pool's non-reentrant lock and deadlock it,
+        #      wedging all later LLM calls (encode/httpcore#996; seen in prod).
+        #    - A per-call client keeps abandoned streams off the shared pool. litellm's
+        #      anthropic handler uses module_level_client only when client is None.
         #
         # 4. PITFALL - is_true_openai_model() CHECK:
         #    - Must use is_true_openai_model() NOT just check model_provider == "openai"
@@ -882,15 +998,16 @@ class LitellmLLM(LLM):
         # and not every model path was traced thoroughly. It is also possible that in future versions of LiteLLM
         # they will realize that their OpenAI handling is not threadsafe. Hope they will just fix it.
         client = None
-        if is_true_openai_model(self.config.model_provider, self.config.model_name):
+        if self._uses_isolated_client():
             client = HTTPHandler(timeout=timeout_override or self._timeout)
 
         try:
-            # When custom_config is set, env vars are temporarily injected
-            # under a global lock. Using stream=True here means the lock is
-            # only held during connection setup (not the full inference).
-            # The chunks are then collected outside the lock and reassembled
-            # into a single ModelResponse via stream_chunk_builder.
+            # When env-only custom_config keys are injected (self-hosted
+            # deployments only), they are set under a global lock. Using
+            # stream=True here means the lock is only held during connection
+            # setup (not the full inference). The chunks are then collected
+            # outside the lock and reassembled into a single ModelResponse
+            # via stream_chunk_builder.
             from litellm import CustomStreamWrapper as LiteLLMCustomStreamWrapper
             from litellm import stream_chunk_builder
 
@@ -963,7 +1080,7 @@ class LitellmLLM(LLM):
         # See invoke() method for full explanation. Key points for streaming:
         #
         # 1. SAME RESTRICTIONS APPLY:
-        #    - HTTPHandler ONLY for true OpenAI models (use is_true_openai_model())
+        #    - HTTPHandler only for providers in _uses_isolated_client()
         #    - OpenAI-compatible providers will fail with AttributeError on api_key
         #
         # 2. STREAMING-SPECIFIC CONCERNS:
@@ -989,7 +1106,7 @@ class LitellmLLM(LLM):
         #    - Per-request HTTPHandler eliminates cross-thread interference
         for attempt in range(max_attempts):
             client = None
-            if is_true_openai_model(self.config.model_provider, self.config.model_name):
+            if self._uses_isolated_client():
                 client = HTTPHandler(timeout=timeout_override or self._timeout)
 
             try:
@@ -1036,25 +1153,32 @@ class LitellmLLM(LLM):
 
 
 @contextmanager
-@log_generator_function_time()
 def temporary_env_and_lock(env_variables: dict[str, str]) -> Iterator[None]:
     """
-    Temporarily sets the environment variables to the given values.
-    _env_lock is held while the environment variables are set, so no concurrent
-    LLM call can observe them. Then cleans up the environment and releases the
-    lock.
+    Temporarily sets the environment variables to the given values while holding
+    the exclusive write side of _env_rwlock, so no concurrent LLM call can
+    observe them. Then cleans up the environment and releases the lock.
+
+    Calls without env_variables hold the shared read side instead: they run
+    concurrently with each other and only block while a writer has env vars
+    injected.
     """
-    if env_variables:
-        masked_env = {
-            key: mask_env_value_for_logging(key, value)
-            for key, value in env_variables.items()
-        }
-        logger.info(
-            "temporary_env_and_lock setting custom_config env var(s): %s",
-            masked_env,
-        )
-    with _env_lock:
-        logger.debug("Acquired lock in temporary_env_and_lock")
+    if not env_variables:
+        with _env_rwlock.gen_rlock():
+            yield
+        return
+
+    masked_env = {
+        key: mask_env_value_for_logging(key, value)
+        for key, value in env_variables.items()
+    }
+    logger.info(
+        "temporary_env_and_lock setting custom_config env var(s): %s",
+        masked_env,
+    )
+    start_time = time.monotonic()
+    with _env_rwlock.gen_wlock():
+        logger.debug("Acquired env write lock in temporary_env_and_lock")
         # Store original values (None if key didn't exist)
         original_values: dict[str, str | None] = {
             key: os.environ.get(key) for key in env_variables
@@ -1069,4 +1193,7 @@ def temporary_env_and_lock(env_variables: dict[str, str]) -> Iterator[None]:
                 else:
                     os.environ[key] = original_value  # Restore original value
 
-    logger.debug("Released lock in temporary_env_and_lock")
+    logger.info(
+        "temporary_env_and_lock write section took %.3f seconds",
+        time.monotonic() - start_time,
+    )

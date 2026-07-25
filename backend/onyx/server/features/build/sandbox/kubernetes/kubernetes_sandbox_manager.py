@@ -49,14 +49,13 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from uuid import UUID
 
-from kubernetes import client
-from kubernetes import watch
+from kubernetes import client, watch
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream as k8s_stream
 
@@ -64,84 +63,77 @@ from onyx.cache.factory import get_cache_backend
 from onyx.cache.interface import CACHE_TRANSIENT_ERRORS
 from onyx.db.enums import SandboxStatus
 from onyx.file_store.file_store import get_default_file_store
-from onyx.server.features.build.configs import OPENCODE_DISABLED_TOOLS
-from onyx.server.features.build.configs import OPENCODE_SERVE_PORT
-from onyx.server.features.build.configs import OPENCODE_SERVER_PASSWORD
-from onyx.server.features.build.configs import SANDBOX_API_SERVER_URL
-from onyx.server.features.build.configs import SANDBOX_CONTAINER_IMAGE
-from onyx.server.features.build.configs import SANDBOX_NAMESPACE
-from onyx.server.features.build.configs import SANDBOX_NEXTJS_PORT_END
-from onyx.server.features.build.configs import SANDBOX_NEXTJS_PORT_START
-from onyx.server.features.build.configs import SANDBOX_PROXY_HOST
-from onyx.server.features.build.configs import SANDBOX_PROXY_INJECTED_PLACEHOLDER
-from onyx.server.features.build.configs import SANDBOX_PROXY_NAMESPACE
-from onyx.server.features.build.configs import SANDBOX_SERVICE_ACCOUNT_NAME
-from onyx.server.features.build.sandbox.base import BUN_CACHE_DIR
-from onyx.server.features.build.sandbox.base import BUN_IMAGE_CACHE_DIR
-from onyx.server.features.build.sandbox.base import SandboxManager
+from onyx.server.features.build.configs import (
+    ONYX_SERVER_URL,
+    OPENCODE_DISABLED_TOOLS,
+    OPENCODE_SERVE_PORT,
+    OPENCODE_SERVER_PASSWORD,
+    SANDBOX_CONTAINER_IMAGE,
+    SANDBOX_NAMESPACE,
+    SANDBOX_NEXTJS_PORT_END,
+    SANDBOX_NEXTJS_PORT_START,
+    SANDBOX_PROXY_HOST,
+    SANDBOX_PROXY_NAMESPACE,
+    SANDBOX_SERVICE_ACCOUNT_NAME,
+)
+from onyx.server.features.build.sandbox.base import (
+    BUN_CACHE_DIR,
+    BUN_IMAGE_CACHE_DIR,
+    SandboxManager,
+)
 from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     PUSH_DAEMON_PORT,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SIDECAR_OPENCODE_HISTORY_CREATE_PATH,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SIDECAR_OPENCODE_HISTORY_MARK_RESTORED_PATH,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SIDECAR_OPENCODE_HISTORY_RESTORE_PATH,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SIDECAR_PUSH_PUBLIC_KEY_ENV_VAR,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SIDECAR_SNAPSHOT_CREATE_PATH,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
-    sidecar_snapshot_restore_path,
-)
-from onyx.server.features.build.sandbox.image.sandbox_daemon.contract import (
     SnapshotCreateRequest,
+    sidecar_snapshot_restore_path,
 )
 from onyx.server.features.build.sandbox.kubernetes.k8s_client import load_kube_config
 from onyx.server.features.build.sandbox.kubernetes.sidecar_client import (
+    SidecarClient,
+    SidecarRequestError,
+    SidecarStatusError,
     get_push_key_pair,
 )
-from onyx.server.features.build.sandbox.kubernetes.sidecar_client import SidecarClient
-from onyx.server.features.build.sandbox.kubernetes.sidecar_client import (
-    SidecarRequestError,
+from onyx.server.features.build.sandbox.labels import (
+    LABEL_K8S_COMPONENT,
+    LABEL_K8S_COMPONENT_SANDBOX,
+    LABEL_K8S_MANAGED_BY,
+    LABEL_K8S_MANAGED_BY_ONYX,
+    LABEL_SANDBOX_ID,
+    LABEL_TENANT_ID,
 )
-from onyx.server.features.build.sandbox.kubernetes.sidecar_client import (
-    SidecarStatusError,
+from onyx.server.features.build.sandbox.models import (
+    CraftLLMProviderConfig,
+    CraftMCPServerConfig,
+    FatalWriteError,
+    FileSet,
+    FilesystemEntry,
+    RetriableWriteError,
+    SandboxInfo,
+    SnapshotResult,
 )
-from onyx.server.features.build.sandbox.labels import LABEL_K8S_COMPONENT
-from onyx.server.features.build.sandbox.labels import LABEL_K8S_COMPONENT_SANDBOX
-from onyx.server.features.build.sandbox.labels import LABEL_K8S_MANAGED_BY
-from onyx.server.features.build.sandbox.labels import LABEL_K8S_MANAGED_BY_ONYX
-from onyx.server.features.build.sandbox.labels import LABEL_SANDBOX_ID
-from onyx.server.features.build.sandbox.labels import LABEL_TENANT_ID
-from onyx.server.features.build.sandbox.models import FatalWriteError
-from onyx.server.features.build.sandbox.models import FileSet
-from onyx.server.features.build.sandbox.models import FilesystemEntry
-from onyx.server.features.build.sandbox.models import LLMProviderConfig
-from onyx.server.features.build.sandbox.models import RetriableWriteError
-from onyx.server.features.build.sandbox.models import SandboxInfo
-from onyx.server.features.build.sandbox.models import SnapshotResult
 from onyx.server.features.build.sandbox.nextjs_dev import build_nextjs_start_script
 from onyx.server.features.build.sandbox.serve_transport import (
     OPENCODE_SERVE_READY_TIMEOUT_SECONDS,
+    ServeConnectionInfo,
 )
-from onyx.server.features.build.sandbox.serve_transport import ServeConnectionInfo
 from onyx.server.features.build.sandbox.snapshot_manager import SnapshotManager
 from onyx.server.features.build.sandbox.util.agent_instructions import (
     ATTACHMENTS_SECTION_CONTENT,
-)
-from onyx.server.features.build.sandbox.util.agent_instructions import (
     generate_agent_instructions,
 )
-from onyx.server.features.build.sandbox.util.opencode_config import (
-    build_multi_provider_opencode_config,
+from onyx.server.features.build.sandbox.util.api_url_check import (
+    validate_sandbox_api_url,
 )
+from onyx.server.features.build.sandbox.util.opencode_config import (
+    build_opencode_base_config,
+    build_provider_opencode_config,
+)
+from onyx.server.settings.store import load_settings
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -153,7 +145,7 @@ _API_SERVER_HOSTNAME = os.environ.get("HOSTNAME", "unknown")
 POD_READY_TIMEOUT_SECONDS = 30
 
 # Shared deadline for IP assignment (scheduling + image pull) and the restore.
-OPENCODE_HISTORY_RESTORE_TIMEOUT_SECONDS = 60.0
+OPENCODE_HISTORY_RESTORE_TIMEOUT_SECONDS = 90.0
 POD_IP_POLL_INTERVAL_SECONDS = 0.5
 
 # Resource deletion timeout and polling interval
@@ -239,21 +231,6 @@ def _provisioning_lock(sandbox_id: UUID, tenant_id: str) -> Iterator[None]:
                 sandbox_id,
                 exc_info=True,
             )
-
-
-def _placeholder_llm_configs(
-    configs: list[LLMProviderConfig],
-) -> list[LLMProviderConfig]:
-    """
-    Swaps real LLM keys for the proxy placeholder before the opencode config
-    reaches the pod; provider/model/api_base stay so routing is unchanged.
-    """
-    return [
-        c.model_copy(update={"api_key": SANDBOX_PROXY_INJECTED_PLACEHOLDER})
-        if c.api_key
-        else c
-        for c in configs
-    ]
 
 
 _MAX_BUNDLE_BYTES = 100 * 1024 * 1024  # 100 MiB
@@ -472,7 +449,6 @@ class KubernetesSandboxManager(SandboxManager):
 
     def _load_agent_instructions(
         self,
-        skills_section: str,
         connectable_apps_section: str,
         provider: str | None = None,
         model_name: str | None = None,
@@ -483,13 +459,13 @@ class KubernetesSandboxManager(SandboxManager):
         """Load and populate agent instructions from template file."""
         return generate_agent_instructions(
             template_path=self._agent_instructions_template_path,
-            skills_section=skills_section,
             connectable_apps_section=connectable_apps_section,
             provider=provider,
             model_name=model_name,
             nextjs_port=nextjs_port,
             disabled_tools=disabled_tools,
             user_name=user_name,
+            organization_instructions=load_settings().craft_instructions,
         )
 
     def _create_sandbox_pod(
@@ -1016,10 +992,7 @@ class KubernetesSandboxManager(SandboxManager):
         sandbox_id: UUID,
         user_id: UUID,
         tenant_id: str,
-        llm_config: LLMProviderConfig,
         onyx_pat: str | None = None,
-        *,
-        all_llm_configs: list[LLMProviderConfig] | None = None,
     ) -> SandboxInfo:
         """Provision a new sandbox as a Kubernetes pod (user-level).
 
@@ -1038,7 +1011,6 @@ class KubernetesSandboxManager(SandboxManager):
             sandbox_id: Unique identifier for the sandbox
             user_id: User identifier who owns this sandbox
             tenant_id: Tenant identifier for multi-tenant isolation
-            llm_config: LLM provider configuration
             onyx_pat: Required by the interface and the Docker backend; on K8s
                 the pod ships a placeholder and the proxy injects the real PAT,
                 so this is only checked as a provisioning precondition.
@@ -1058,10 +1030,11 @@ class KubernetesSandboxManager(SandboxManager):
 
         if not onyx_pat:
             raise ValueError("onyx_pat is required for Kubernetes sandbox provisioning")
-        if not SANDBOX_API_SERVER_URL:
+        if not ONYX_SERVER_URL:
             raise ValueError(
-                "SANDBOX_API_SERVER_URL must be set for Kubernetes sandbox provisioning"
+                "ONYX_SERVER_URL must be set for Kubernetes sandbox provisioning"
             )
+        validate_sandbox_api_url(ONYX_SERVER_URL)
         if not SANDBOX_PROXY_HOST:
             raise ValueError(
                 "SANDBOX_PROXY_HOST must be set for Kubernetes sandbox provisioning"
@@ -1119,22 +1092,15 @@ class KubernetesSandboxManager(SandboxManager):
                     self._terminated_sandboxes.discard(sandbox_id)
                 self._invalidate_serve_connection_info(sandbox_id)
 
-                # Secret must exist before the Pod (secretKeyRef). Pre-load every
-                # provider for cross-provider model overrides; keys are swapped for
-                # the proxy placeholder so the pod never holds them.
-                providers = _placeholder_llm_configs(all_llm_configs or [llm_config])
-                opencode_config_json = json.dumps(
-                    build_multi_provider_opencode_config(
-                        providers=providers,
-                        default_provider=llm_config.provider,
-                        default_model=llm_config.model_name,
-                        disabled_tools=OPENCODE_DISABLED_TOOLS,
-                        plugins=[
-                            _OPENCODE_CONNECT_APP_PLUGIN_PATH,
-                            _OPENCODE_SESSION_TAG_PLUGIN_PATH,
-                        ],
-                    )
+                # Secret must exist before the Pod (secretKeyRef).
+                opencode_config = build_opencode_base_config(
+                    disabled_tools=OPENCODE_DISABLED_TOOLS,
+                    plugins=[
+                        _OPENCODE_CONNECT_APP_PLUGIN_PATH,
+                        _OPENCODE_SESSION_TAG_PLUGIN_PATH,
+                    ],
                 )
+                opencode_config_json = json.dumps(opencode_config)
                 self._provision_opencode_secret(str(sandbox_id), opencode_config_json)
 
                 # 1. Create Pod (user-level only, no session setup)
@@ -1386,11 +1352,11 @@ class KubernetesSandboxManager(SandboxManager):
         self,
         sandbox_id: UUID,
         session_id: UUID,
-        llm_config: LLMProviderConfig,
+        llm_config: CraftLLMProviderConfig,
         nextjs_port: int | None,
-        skills_section: str,
         connectable_apps_section: str,
         user_name: str | None = None,
+        mcp_servers: Sequence[CraftMCPServerConfig] = (),
     ) -> None:
         """Set up a session workspace within an existing sandbox pod.
 
@@ -1419,7 +1385,6 @@ class KubernetesSandboxManager(SandboxManager):
         #
         # Attachments section is injected dynamically when first file is uploaded.
         agent_instructions = self._load_agent_instructions(
-            skills_section=skills_section,
             connectable_apps_section=connectable_apps_section,
             provider=llm_config.provider,
             model_name=llm_config.model_name,
@@ -1429,6 +1394,18 @@ class KubernetesSandboxManager(SandboxManager):
         )
 
         agent_instructions_escaped = agent_instructions.replace("'", "'\\''")
+        session_opencode_config = json.dumps(
+            build_provider_opencode_config(
+                llm_config,
+                disabled_tools=OPENCODE_DISABLED_TOOLS,
+                mcp_servers=mcp_servers,
+                session_id=str(session_id),
+            )
+        )
+        session_opencode_config_setup = (
+            f"printf '%s' {shlex.quote(session_opencode_config)} > "
+            f"{session_path}/opencode.json"
+        )
 
         # Copy outputs template from baked-in location and install npm dependencies
         outputs_setup = f"""
@@ -1490,6 +1467,8 @@ echo "Linked user_library to /workspace/managed/user_library"
 # Write agent instructions
 echo "Writing AGENTS.md"
 printf '%s' '{agent_instructions_escaped}' > {session_path}/AGENTS.md
+
+{session_opencode_config_setup}
 
 # Start Next.js dev server
 {nextjs_start_script}
@@ -1590,12 +1569,14 @@ echo "Session cleanup complete"
             if e.status == 404:
                 # Pod not found, nothing to clean up
                 logger.debug("Pod %s not found, skipping cleanup", pod_name)
-            else:
-                logger.warning(
-                    "Error cleaning up session workspace %s: %s", session_id, e
-                )
+                return
+            raise RuntimeError(
+                f"Failed to clean up session workspace {session_id}"
+            ) from e
         except Exception as e:
-            logger.warning("Error cleaning up session workspace %s: %s", session_id, e)
+            raise RuntimeError(
+                f"Failed to clean up session workspace {session_id}"
+            ) from e
 
     def create_snapshot(
         self,
@@ -1845,9 +1826,9 @@ echo "Session cleanup complete"
         session_id: UUID,
         snapshot_storage_path: str,
         nextjs_port: int | None,
-        llm_config: LLMProviderConfig,
-        skills_section: str,
+        llm_config: CraftLLMProviderConfig,
         connectable_apps_section: str,
+        mcp_servers: Sequence[CraftMCPServerConfig] = (),
     ) -> None:
         """Restore a FileStore-backed snapshot through the sidecar filesystem API.
 
@@ -1893,13 +1874,15 @@ echo "Session cleanup complete"
                 )
 
             # Regenerate configuration files that aren't in the snapshot.
-            self._regenerate_session_config(
-                pod_name=pod_name,
-                session_path=safe_session_path,
-                llm_config=llm_config,
+            self.regenerate_session_config(
+                sandbox_id=sandbox_id,
+                session_id=session_id,
+                agent_provider=llm_config.provider,
+                agent_model=llm_config.model_name,
                 nextjs_port=nextjs_port,
-                skills_section=skills_section,
                 connectable_apps_section=connectable_apps_section,
+                llm_config=llm_config,
+                mcp_servers=mcp_servers,
             )
 
             if nextjs_port is not None:
@@ -1920,46 +1903,64 @@ echo "Session cleanup complete"
         except ApiException as e:
             raise RuntimeError(f"Failed to restore snapshot: {e}") from e
 
-    def _regenerate_session_config(
+    def regenerate_session_config(
         self,
-        pod_name: str,
-        session_path: str,
-        llm_config: LLMProviderConfig,
+        *,
+        sandbox_id: UUID,
+        session_id: UUID,
+        agent_provider: str | None,
+        agent_model: str | None,
         nextjs_port: int | None,
-        skills_section: str,
         connectable_apps_section: str,
+        user_name: str | None = None,
+        llm_config: CraftLLMProviderConfig | None = None,
+        mcp_servers: Sequence[CraftMCPServerConfig] = (),
     ) -> None:
-        """Regenerate session configuration files after snapshot restore.
-
-        Creates:
-        - AGENTS.md (agent instructions)
-        - opencode.json (LLM configuration)
-
-        Args:
-            pod_name: The pod name to exec into
-            session_path: Path to the session directory (already shlex.quoted)
-            llm_config: LLM provider configuration
-            nextjs_port: Port for NextJS (used in AGENTS.md). None when the
-                dev server is intentionally skipped — the template renders
-                "Unknown" in that case.
-        """
+        """Rewrite generated session configuration and managed symlinks."""
+        pod_name = self._get_pod_name(str(sandbox_id))
+        session_path = shlex.quote(f"/workspace/sessions/{session_id}")
         agent_instructions = self._load_agent_instructions(
-            skills_section=skills_section,
             connectable_apps_section=connectable_apps_section,
-            provider=llm_config.provider,
-            model_name=llm_config.model_name,
+            provider=agent_provider,
+            model_name=agent_model,
             nextjs_port=nextjs_port,
             disabled_tools=OPENCODE_DISABLED_TOOLS,
-            user_name=None,
+            user_name=user_name,
         )
 
         agent_instructions_escaped = agent_instructions.replace("'", "'\\''")
+        session_opencode_config = (
+            json.dumps(
+                build_provider_opencode_config(
+                    llm_config,
+                    disabled_tools=OPENCODE_DISABLED_TOOLS,
+                    mcp_servers=mcp_servers,
+                    session_id=str(session_id),
+                )
+            )
+            if llm_config is not None
+            else None
+        )
+        session_opencode_config_setup = (
+            f"printf '%s' {shlex.quote(session_opencode_config)} > "
+            f"{session_path}/opencode.json"
+            if session_opencode_config is not None
+            else ""
+        )
+        attachments_content_b64 = base64.b64encode(
+            ATTACHMENTS_SECTION_CONTENT.encode()
+        ).decode()
         config_script = f"""
 set -e
 mkdir -p {session_path}/.opencode
 ln -sfn /workspace/managed/skills {session_path}/.opencode/skills
 ln -sfn /workspace/managed/user_library {session_path}/user_library
 printf '%s' '{agent_instructions_escaped}' > {session_path}/AGENTS.md
+{session_opencode_config_setup}
+if [ -n "$(find {session_path}/attachments -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    printf '\n\n' >> {session_path}/AGENTS.md
+    echo '{attachments_content_b64}' | base64 -d >> {session_path}/AGENTS.md
+fi
 """
 
         logger.info("Regenerating session configuration files")
@@ -2210,7 +2211,7 @@ printf '%s' '{agent_instructions_escaped}' > {session_path}/AGENTS.md
         """Ensure AGENTS.md has the attachments section.
 
         Called after uploading a file. Only adds the section if it doesn't exist.
-        Inserts the section above ## Skills for better document flow.
+        Inserts the section above ## Connectable apps for better document flow.
         This is a fire-and-forget operation - failures are logged but not raised.
         """
         pod_name = self._get_pod_name(str(sandbox_id))
@@ -2222,19 +2223,19 @@ printf '%s' '{agent_instructions_escaped}' > {session_path}/AGENTS.md
             ATTACHMENTS_SECTION_CONTENT.encode()
         ).decode()
 
-        # Script: add section before ## Skills if not present
+        # Script: add section before ## Connectable apps if not present
         # Uses a temp file approach for safe insertion
         script = f"""
 if [ -f "{agents_md_path}" ]; then
     if ! grep -q "## Attachments (PRIORITY)" "{agents_md_path}" 2>/dev/null; then
-        # Check if ## Skills exists
-        if grep -q "## Skills" "{agents_md_path}" 2>/dev/null; then
-            # Insert before ## Skills using awk
+        # Check if ## Connectable apps exists
+        if grep -q "## Connectable apps" "{agents_md_path}" 2>/dev/null; then
+            # Insert before ## Connectable apps using awk
             awk -v content="$(echo "{attachments_content_b64}" | base64 -d)" '
-                /^## Skills/ {{ print content; print ""; }}
+                /^## Connectable apps/ {{ print content; print ""; }}
                 {{ print }}
             ' "{agents_md_path}" > "{agents_md_path}.tmp" && mv "{agents_md_path}.tmp" "{agents_md_path}"
-            echo "ADDED_BEFORE_SKILLS"
+            echo "ADDED_BEFORE_CONNECTABLE_APPS"
         else
             # Fallback: append to end
             echo "" >> "{agents_md_path}"
