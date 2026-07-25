@@ -86,6 +86,7 @@ services:
       - CODE_INTERPRETER_BASE_URL=${CODE_INTERPRETER_BASE_URL:-http://code-interpreter:8000}
       # LOCAL-ONLY: OCR fallback for scanned PDFs, reached over llm-net.
       - DOCLING_SERVE_URL=${DOCLING_SERVE_URL:-}
+      - DOCLING_OCR_PRESET=${DOCLING_OCR_PRESET:-}
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
       - S3_AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID:-minioadmin}
       - S3_AWS_SECRET_ACCESS_KEY=${S3_AWS_SECRET_ACCESS_KEY:-minioadmin}
@@ -169,6 +170,7 @@ services:
       # LOCAL-ONLY: OCR fallback for scanned PDFs, reached over llm-net.
       # The worker is where OCR actually runs, so this one matters most.
       - DOCLING_SERVE_URL=${DOCLING_SERVE_URL:-}
+      - DOCLING_OCR_PRESET=${DOCLING_OCR_PRESET:-}
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
       - S3_AWS_ACCESS_KEY_ID=${S3_AWS_ACCESS_KEY_ID:-minioadmin}
       - S3_AWS_SECRET_ACCESS_KEY=${S3_AWS_SECRET_ACCESS_KEY:-minioadmin}
