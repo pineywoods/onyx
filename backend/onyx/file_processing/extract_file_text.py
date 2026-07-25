@@ -31,6 +31,7 @@ from onyx.file_processing.file_types import (
     OnyxFileExtensions,
     OnyxMimeTypes,
 )
+from onyx.file_processing.docling import docling_to_text, get_docling_url
 from onyx.file_processing.html_utils import parse_html_page_basic
 from onyx.file_processing.unstructured import (
     get_unstructured_api_key,
@@ -991,6 +992,18 @@ def _extract_text_and_images(
                 extract_images=get_image_extraction_and_analysis_enabled(),
                 image_callback=image_callback,
             )
+            # Scans yield no text (or whitespace only). OCR them here rather than
+            # in the upload request: this runs in the user_file_processing worker,
+            # where a multi-minute conversion is acceptable.
+            if not text_content.strip() and get_docling_url():
+                try:
+                    text_content = docling_to_text(file, file_name)
+                except Exception as e:
+                    logger.error(
+                        "Docling OCR failed for %s: %s. Continuing without text.",
+                        file_name,
+                        str(e),
+                    )
             return ExtractionResult(
                 text_content=text_content, embedded_images=images, metadata=pdf_metadata
             )

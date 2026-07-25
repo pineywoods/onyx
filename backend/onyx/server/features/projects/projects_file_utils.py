@@ -11,6 +11,7 @@ from onyx.configs.app_configs import (
 )
 from onyx.configs.llm_configs import get_image_extraction_and_analysis_enabled
 from onyx.db.llm import fetch_default_llm_model
+from onyx.file_processing.docling import get_docling_url
 from onyx.file_processing.extract_file_text import (
     count_docx_embedded_images,
     count_pdf_embedded_images,
@@ -324,8 +325,12 @@ def categorize_uploaded_files(
                     # Documents with embedded images (e.g. scans) have no
                     # extractable text but can still be indexed via the
                     # vision-LLM captioning path when image analysis is
-                    # enabled.
-                    if image_bearing_ext and count > 0 and image_extraction_enabled:
+                    # enabled, or OCR'd by docling in the processing worker.
+                    # OCR is deliberately not run here — this is a synchronous
+                    # upload request and a multi-page scan would time it out.
+                    if image_bearing_ext and count > 0 and (
+                        image_extraction_enabled or get_docling_url()
+                    ):
                         results.acceptable.append(upload)
                         results.acceptable_file_to_token_count[filename] = 0
                         try:

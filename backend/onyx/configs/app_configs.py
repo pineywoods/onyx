@@ -1879,6 +1879,14 @@ DB_READONLY_PASSWORD: str = urllib.parse.quote_plus(
     os.environ.get("DB_READONLY_PASSWORD") or "password"
 )
 
+# Docling OCR fallback. When set, documents whose native text extraction comes
+# back empty (scans) are OCR'd via docling-serve instead of being rejected.
+# Unset disables the fallback entirely and restores stock behavior.
+DOCLING_SERVE_URL = os.environ.get("DOCLING_SERVE_URL", "")
+# tesseract preserves word spacing; RapidOCR (docling's "auto") does not.
+DOCLING_OCR_PRESET = os.environ.get("DOCLING_OCR_PRESET") or "tesseract"
+DOCLING_REQUEST_TIMEOUT = int(os.environ.get("DOCLING_REQUEST_TIMEOUT") or "900")
+
 # File Store Configuration
 # Which backend to use for file storage: "s3" (S3/MinIO) or "postgres" (PostgreSQL Large Objects)
 FILE_STORE_BACKEND = os.environ.get("FILE_STORE_BACKEND", "s3")
