@@ -1883,8 +1883,10 @@ DB_READONLY_PASSWORD: str = urllib.parse.quote_plus(
 # back empty (scans) are OCR'd via docling-serve instead of being rejected.
 # Unset disables the fallback entirely and restores stock behavior.
 DOCLING_SERVE_URL = os.environ.get("DOCLING_SERVE_URL", "")
-# tesseract preserves word spacing; RapidOCR (docling's "auto") does not.
-DOCLING_OCR_PRESET = os.environ.get("DOCLING_OCR_PRESET") or "tesseract"
+# easyocr runs on the GPU and reads scans more cleanly than tesseract, which
+# transcribes bullet glyphs as text and can truncate pages. Either beats
+# RapidOCR (docling's "auto"), which drops spaces between English words.
+DOCLING_OCR_PRESET = os.environ.get("DOCLING_OCR_PRESET") or "easyocr"
 DOCLING_REQUEST_TIMEOUT = int(os.environ.get("DOCLING_REQUEST_TIMEOUT") or "900")
 
 # File Store Configuration
