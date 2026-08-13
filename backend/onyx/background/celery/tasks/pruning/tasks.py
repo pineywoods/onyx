@@ -209,7 +209,7 @@ def _is_pruning_due(cc_pair: ConnectorCredentialPair) -> bool:
     return datetime.now(timezone.utc) >= next_prune
 
 
-@shared_task(
+@shared_task(  # ty: ignore[invalid-argument-type]
     name=OnyxCeleryTask.CHECK_FOR_PRUNING,
     ignore_result=True,
     soft_time_limit=JOB_TIMEOUT,
@@ -473,7 +473,7 @@ def try_creating_prune_generator_task(
     return payload_id
 
 
-@shared_task(
+@shared_task(  # ty: ignore[invalid-argument-type]
     name=OnyxCeleryTask.CONNECTOR_PRUNING_GENERATOR_TASK,
     acks_late=False,
     soft_time_limit=JOB_TIMEOUT,
@@ -496,7 +496,7 @@ def connector_pruning_generator_task(
 
     LoggerContextVars.reset()
 
-    pruning_ctx_dict = pruning_ctx.get()
+    pruning_ctx_dict = dict(pruning_ctx.get())
     pruning_ctx_dict["cc_pair_id"] = cc_pair_id
     pruning_ctx_dict["request_id"] = self.request.id
     pruning_ctx.set(pruning_ctx_dict)

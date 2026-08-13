@@ -69,7 +69,8 @@ import { cn } from "@opal/utils";
 import { Interactive } from "@opal/core";
 import { useTierAtLeast } from "@/hooks/useTierAtLeast";
 import { Tier } from "@/lib/settings/types";
-import { useIsSearchModeAvailable } from "@/lib/settings/hooks";
+import { useIsSearchModeAvailable, useSettings } from "@/lib/settings/hooks";
+import { tierAtLeast } from "@/lib/tiers";
 import { Tooltip } from "@opal/components";
 import { useCloudSubscription } from "@/hooks/useCloudSubscription";
 import { useSmoothStreaming } from "@/hooks/useSmoothStreaming";
@@ -90,6 +91,7 @@ interface PatScopeOption {
   group_label: string;
   label: string;
   description: string;
+  min_tier: Tier;
   implies: string[];
 }
 
@@ -282,7 +284,7 @@ function PATModal({
         </Button>
       }
     >
-      <Section gap={1}>
+      <Section gap={4}>
         <InputVertical title="Token Name" withLabel>
           <InputTypeIn
             placeholder="Name your token"
@@ -450,7 +452,7 @@ function GeneralSettings() {
             </Button>
           }
         >
-          <Section gap={0.5} alignItems="start">
+          <Section gap={2} alignItems="start">
             <Text color="text-05">
               All your chat sessions and history will be permanently deleted.
               Deletion cannot be undone.
@@ -462,8 +464,8 @@ function GeneralSettings() {
         </ConfirmationModalLayout>
       )}
 
-      <Section gap={2}>
-        <Section gap={0.75}>
+      <Section gap={8}>
+        <Section gap={3}>
           <Content
             title="Profile"
             sizePreset="main-content"
@@ -528,7 +530,7 @@ function GeneralSettings() {
           </Card>
         </Section>
 
-        <Section gap={0.75}>
+        <Section gap={3}>
           <Content
             title="Appearance"
             sizePreset="main-content"
@@ -633,9 +635,9 @@ function GeneralSettings() {
           </Card>
         </Section>
 
-        <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+        <Divider paddingParallel={0} paddingPerpendicular={0} />
 
-        <Section gap={0.75}>
+        <Section gap={3}>
           <Content
             title="Danger Zone"
             sizePreset="main-content"
@@ -865,7 +867,7 @@ function PromptShortcuts() {
   return (
     <>
       {shortcuts.length > 0 && (
-        <Section gap={0.75}>
+        <Section gap={3}>
           {shortcuts.map((shortcut, index) => {
             const isEmpty = !shortcut.prompt.trim() && !shortcut.content.trim();
             const isExisting = !shortcut.isNew;
@@ -1026,8 +1028,8 @@ function ChatPreferencesSettings() {
   );
 
   return (
-    <Section gap={2}>
-      <Section gap={0.75}>
+    <Section gap={8}>
+      <Section gap={3}>
         <Content
           title="Chats"
           sizePreset="main-content"
@@ -1058,9 +1060,15 @@ function ChatPreferencesSettings() {
                     name: opt.name,
                     provider: opt.provider,
                     modelName: opt.modelName,
+                    modelConfigurationId: opt.modelConfigurationId,
                   });
                   void updateUserDefaultModel(
-                    structureValue(opt.name, opt.provider, opt.modelName)
+                    structureValue(
+                      opt.name,
+                      opt.provider,
+                      opt.modelName,
+                      opt.modelConfigurationId
+                    )
                   );
                 }
               }}
@@ -1142,7 +1150,7 @@ function ChatPreferencesSettings() {
         </Card>
       </Section>
 
-      <Section gap={0.75}>
+      <Section gap={3}>
         <InputVertical
           title="Personal Preferences"
           description="Provide your custom preferences in natural language."
@@ -1210,7 +1218,7 @@ function ChatPreferencesSettings() {
         </Card>
       </Section>
 
-      <Section gap={0.75}>
+      <Section gap={3}>
         <Content
           title="Prompt Shortcuts"
           sizePreset="main-content"
@@ -1235,7 +1243,7 @@ function ChatPreferencesSettings() {
         </Card>
       </Section>
 
-      <Section gap={0.75}>
+      <Section gap={3}>
         <Content
           title="Voice"
           sizePreset="main-content"
@@ -1357,12 +1365,21 @@ function AccountsAccessSettings() {
     }
   );
 
-  const { data: scopeOptions = [], error: scopeOptionsError } = useSWR<
+  const { data: allScopeOptions = [], error: scopeOptionsError } = useSWR<
     PatScopeOption[]
   >(
     showTokensSection && canCreateTokens ? SWR_KEYS.userPatScopes : null,
     errorHandlingFetcher,
     { fallbackData: [] }
+  );
+  const currentTier = useSettings().tier;
+  const scopeOptions = useMemo(
+    () =>
+      // Undefined tier (settings loading/failed) must not hide Community scopes.
+      allScopeOptions.filter((option) =>
+        tierAtLeast(currentTier ?? Tier.COMMUNITY, option.min_tier)
+      ),
+    [allScopeOptions, currentTier]
   );
 
   const scopeLabels = useMemo(
@@ -1542,7 +1559,7 @@ function AccountsAccessSettings() {
             </Button>
           }
         >
-          <Section gap={0.5} alignItems="start">
+          <Section gap={2} alignItems="start">
             <Text color="text-05">
               {`Any application using the token ${tokenToDelete.name} (${tokenToDelete.token_display}) will lose access to Onyx. This action cannot be undone.`}
             </Text>
@@ -1599,8 +1616,8 @@ function AccountsAccessSettings() {
                   setShowPasswordModal(false);
                 }}
               >
-                <Section gap={1}>
-                  <Section gap={0.25} alignItems="start">
+                <Section gap={4}>
+                  <Section gap={1} alignItems="start">
                     <InputVertical
                       withLabel="currentPassword"
                       title="Current Password"
@@ -1616,7 +1633,7 @@ function AccountsAccessSettings() {
                       />
                     </InputVertical>
                   </Section>
-                  <Section gap={0.25} alignItems="start">
+                  <Section gap={1} alignItems="start">
                     <InputVertical withLabel="newPassword" title="New Password">
                       <PasswordInputTypeIn
                         name="newPassword"
@@ -1627,7 +1644,7 @@ function AccountsAccessSettings() {
                       />
                     </InputVertical>
                   </Section>
-                  <Section gap={0.25} alignItems="start">
+                  <Section gap={1} alignItems="start">
                     <InputVertical
                       withLabel="confirmPassword"
                       title="Confirm New Password"
@@ -1650,8 +1667,8 @@ function AccountsAccessSettings() {
         </Formik>
       )}
 
-      <Section gap={2}>
-        <Section gap={0.75}>
+      <Section gap={8}>
+        <Section gap={3}>
           <Content
             title="Accounts"
             sizePreset="main-content"
@@ -1687,7 +1704,7 @@ function AccountsAccessSettings() {
         </Section>
 
         {showTokensSection && (
-          <Section gap={0.75}>
+          <Section gap={3}>
             <Content
               title="Access Tokens"
               sizePreset="main-content"
@@ -1695,12 +1712,12 @@ function AccountsAccessSettings() {
               width="full"
             />
             {canCreateTokens ? (
-              <Card padding={0.25}>
+              <Card padding={1}>
                 <Section gap={0}>
-                  <Section flexDirection="row" padding={0.25} gap={0.5}>
+                  <Section flexDirection="row" padding={1} gap={2}>
                     {pats.length === 0 ? (
                       <Section
-                        padding={0.5}
+                        padding={2}
                         alignItems="start"
                         data-testid="access-token-list-status"
                       >
@@ -1731,7 +1748,7 @@ function AccountsAccessSettings() {
                     </div>
                   </Section>
 
-                  <Section gap={0.25}>
+                  <Section gap={1}>
                     {filteredPats.map((pat) => {
                       const now = new Date();
                       const createdDate = new Date(pat.created_at);
@@ -1890,7 +1907,7 @@ function FederatedConnectorCard({
             </Button>
           }
         >
-          <Section gap={0.5} alignItems="start">
+          <Section gap={2} alignItems="start">
             <Text color="text-05">
               {`Onyx will no longer be able to access or search content from your ${sourceMetadata.displayName} account.`}
             </Text>
@@ -1901,7 +1918,7 @@ function FederatedConnectorCard({
         </ConfirmationModalLayout>
       )}
 
-      <Card padding={0.5}>
+      <Card padding={2}>
         <ContentAction
           icon={sourceMetadata.icon}
           title={sourceMetadata.displayName}
@@ -1910,7 +1927,7 @@ function FederatedConnectorCard({
           }
           sizePreset="main-content"
           variant="section"
-          padding="sm"
+          padding={1}
           rightChildren={
             connector.has_oauth_token ? (
               <Button
@@ -1977,8 +1994,8 @@ function ConnectorsSettings() {
     Object.keys(groupedConnectors).length > 0 || federatedConnectors.length > 0;
 
   return (
-    <Section gap={2}>
-      <Section gap={0.75} justifyContent="start">
+    <Section gap={8}>
+      <Section gap={3} justifyContent="start">
         <Content
           title="Connectors"
           sizePreset="main-content"

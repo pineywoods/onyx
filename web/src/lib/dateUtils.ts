@@ -28,6 +28,26 @@ export function getXDaysAgo(daysAgo: number) {
   return daysAgoDate;
 }
 
+export function convertDateToEndOfDay(date?: Date | null) {
+  if (!date) {
+    return date;
+  }
+
+  const dateCopy = new Date(date);
+  dateCopy.setHours(23, 59, 59, 999);
+  return dateCopy;
+}
+
+export function convertDateToStartOfDay(date?: Date | null) {
+  if (!date) {
+    return date;
+  }
+
+  const dateCopy = new Date(date);
+  dateCopy.setHours(0, 0, 0, 0);
+  return dateCopy;
+}
+
 export function getXYearsAgo(yearsAgo: number) {
   const today = new Date();
   const yearsAgoDate = new Date(today);
@@ -159,6 +179,17 @@ export const formatDateShort = (dateStr: string | null | undefined): string => {
     year: "numeric",
   });
 };
+
+// Parses at local midnight so the day never shifts the way `formatDateShort` can for callers west of UTC.
+export const formatCalendarDay = (
+  dateStr: string,
+  { withYear = false }: { withYear?: boolean } = {}
+): string =>
+  new Date(`${dateStr}T00:00:00`).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(withYear && { year: "numeric" }),
+  });
 
 /**
  * Format an ISO timestamp as "YYYY/MM/DD HH:MM:SS" (24-hour, local time).

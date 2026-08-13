@@ -43,13 +43,13 @@ export default function InviteOnlyCard() {
   );
 
   return (
-    <Card gap={0.5} padding={0.75}>
+    <Card gap={2} padding={3}>
       <ContentAction
         title="Restrict Open Sign-Up"
         description="New users must be invited to join this workspace."
         sizePreset="main-ui"
         variant="section"
-        padding="fit"
+        padding={0}
         rightChildren={
           <Switch
             checked={settings.invite_only_enabled ?? false}

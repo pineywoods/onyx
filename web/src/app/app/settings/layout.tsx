@@ -36,6 +36,7 @@ export default function Layout({ children }: LayoutProps) {
       ? [{ href: "/app/settings/accounts-access", label: "Accounts & Access" }]
       : []),
     { href: "/app/settings/connectors", label: "Connectors" },
+    { href: "/app/settings/usage", label: "Usage" },
   ];
 
   // Derive the trigger label from the pathname directly. InputSelect normally
@@ -53,7 +54,7 @@ export default function Layout({ children }: LayoutProps) {
           flexDirection="column"
           justifyContent="start"
           alignItems="stretch"
-          gap={1.5}
+          gap={6}
           className="sm:flex-row sm:items-start"
         >
           {/* Narrow screens: dropdown navigation above the tab content */}

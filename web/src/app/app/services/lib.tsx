@@ -14,6 +14,8 @@ import {
   Message,
   MessageResponseIDInfo,
   MultiModelMessageResponseIDInfo,
+  RateLimitDetails,
+  RATE_LIMITED_ERROR_CODE,
   ResearchType,
   RetrievalType,
   StreamingError,
@@ -81,7 +83,9 @@ export async function updateReasoningEffortForChatSession(
 export async function createChatSession(
   personaId: number,
   description: string | null,
-  projectId: number | null
+  projectId: number | null,
+  incognito: boolean = false,
+  incognitoSessionId: string | null = null
 ): Promise<string> {
   const createChatSessionResponse = await fetch(
     "/api/chat/create-chat-session",
@@ -94,6 +98,8 @@ export async function createChatSession(
         persona_id: personaId,
         description,
         project_id: projectId,
+        incognito,
+        incognito_session_id: incognitoSessionId,
       }),
     }
   );
@@ -104,7 +110,23 @@ export async function createChatSession(
     throw Error("Failed to create chat session");
   }
   const chatSessionResponseJson = await createChatSessionResponse.json();
+  // A server that omits the echo (e.g. an old pod mid-deploy) did not pin the
+  // mode, so proceeding would silently persist a believed-incognito chat.
+  if (incognito && chatSessionResponseJson.incognito !== true) {
+    throw Error("Server did not honor the incognito request");
+  }
   return chatSessionResponseJson.chat_session_id;
+}
+
+export async function endIncognitoSession(sessionId: string): Promise<boolean> {
+  // The server finds the session's uploads itself, so nothing to send.
+  const response = await fetch(`/api/chat/end-incognito-session/${sessionId}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    console.error(`Failed to end incognito session - ${response.status}`);
+  }
+  return response.ok;
 }
 
 export type PacketType =
@@ -134,6 +156,7 @@ export interface LLMOverride {
   model_version: string;
   temperature?: number;
   display_name?: string;
+  model_configuration_id?: number | null;
 }
 
 export interface SendMessageParams {
@@ -150,6 +173,7 @@ export interface SendMessageParams {
   // LLM override parameters
   modelProvider?: string;
   modelVersion?: string;
+  modelConfigurationId?: number | null;
   temperature?: number;
   // Multi-model: send multiple LLM overrides for parallel generation
   llmOverrides?: LLMOverride[];
@@ -172,6 +196,7 @@ export async function* sendMessage({
   forcedToolId,
   modelProvider,
   modelVersion,
+  modelConfigurationId,
   temperature,
   llmOverrides,
   origin,
@@ -188,11 +213,12 @@ export async function* sendMessage({
     allowed_tool_ids: enabledToolIds,
     forced_tool_id: forcedToolId ?? null,
     llm_override:
-      temperature || modelVersion
+      temperature || modelVersion || modelConfigurationId != null
         ? {
             temperature,
             model_provider: modelProvider,
             model_version: modelVersion,
+            model_configuration_id: modelConfigurationId ?? null,
           }
         : null,
     // Multi-model: list of LLM overrides for parallel generation
@@ -215,6 +241,31 @@ export async function* sendMessage({
 
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
+
+    // Surface the usage rate-limit (429) as a structured StreamingError packet
+    // so the chat UI can render the dedicated usage-limit banner. Throwing a
+    // bare Error here would flatten error_code/reset_at into an opaque string.
+    if (
+      response.status === 429 &&
+      data.error_code === RATE_LIMITED_ERROR_CODE
+    ) {
+      const rateLimitDetails: RateLimitDetails = {
+        scope: data.scope,
+        reset_at: data.reset_at,
+        retry_after_seconds: data.retry_after_seconds,
+      };
+      const streamingError: StreamingError = {
+        error: data.detail ?? "You've reached your usage limit.",
+        stack_trace: "",
+        error_code: RATE_LIMITED_ERROR_CODE,
+        // Regenerate would just re-trip the limit, so this is not retryable.
+        is_retryable: false,
+        details: rateLimitDetails,
+      };
+      yield streamingError;
+      return;
+    }
+
     throw new Error(data.detail ?? `HTTP error! status: ${response.status}`);
   }
 
@@ -368,10 +419,15 @@ export async function deleteAllChatSessions() {
 }
 
 export async function getAvailableContextTokens(
-  chatSessionId: string
+  chatSessionId: string,
+  modelConfigurationId?: number | null
 ): Promise<number | null> {
+  const params =
+    modelConfigurationId != null
+      ? `?model_configuration_id=${modelConfigurationId}`
+      : "";
   const response = await fetch(
-    `/api/chat/available-context-tokens/${chatSessionId}`
+    `/api/chat/available-context-tokens/${chatSessionId}${params}`
   );
   if (!response.ok) {
     return null;

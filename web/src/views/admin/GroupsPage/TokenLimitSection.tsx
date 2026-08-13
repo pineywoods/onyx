@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useState } from "react";
 import { SvgPlusCircle, SvgMinusCircle } from "@opal/icons";
 import { Button } from "@opal/components";
 import { Disabled } from "@opal/core";
@@ -18,9 +18,14 @@ import SimpleCollapsible from "@/refresh-components/SimpleCollapsible";
 // ---------------------------------------------------------------------------
 
 export interface TokenLimit {
+  tokenId: number | null;
+  enabled: boolean;
   tokenBudget: number | null;
   periodDays: number | null;
+  costBudgetDollars: number | null;
 }
+
+type TokenLimitValueField = "tokenBudget" | "periodDays" | "costBudgetDollars";
 
 interface TokenLimitSectionProps {
   limits: TokenLimit[];
@@ -39,37 +44,70 @@ function TokenLimitSection({
   disabled,
   disabledTooltip,
 }: TokenLimitSectionProps) {
-  const nextKeyRef = useRef(limits.length);
-  const keysRef = useRef<number[]>(limits.map((_, i) => i));
+  const [rowKeys, setRowKeys] = useState<{
+    keys: number[];
+    nextKey: number;
+  }>({
+    keys: limits.map((_, i) => i),
+    nextKey: limits.length,
+  });
 
   // Sync keys if the parent provides a different number of limits externally
   // (e.g. loaded from server after initial mount).
-  if (keysRef.current.length < limits.length) {
-    while (keysRef.current.length < limits.length) {
-      keysRef.current.push(nextKeyRef.current++);
-    }
-  } else if (keysRef.current.length > limits.length) {
-    keysRef.current = keysRef.current.slice(0, limits.length);
+  if (rowKeys.keys.length < limits.length) {
+    const keysToAdd = limits.length - rowKeys.keys.length;
+    setRowKeys({
+      keys: [
+        ...rowKeys.keys,
+        ...Array.from(
+          { length: keysToAdd },
+          (_, index) => rowKeys.nextKey + index
+        ),
+      ],
+      nextKey: rowKeys.nextKey + keysToAdd,
+    });
+  } else if (rowKeys.keys.length > limits.length) {
+    setRowKeys({
+      keys: rowKeys.keys.slice(0, limits.length),
+      nextKey: rowKeys.nextKey,
+    });
   }
 
   function addLimit() {
     const emptyIndex = limits.findIndex(
-      (l) => l.tokenBudget === null && l.periodDays === null
+      (l) =>
+        l.tokenBudget === null &&
+        l.periodDays === null &&
+        l.costBudgetDollars === null
     );
     if (emptyIndex !== -1) return;
-    const key = nextKeyRef.current++;
-    keysRef.current = [...keysRef.current, key];
-    onLimitsChange([...limits, { tokenBudget: null, periodDays: null }]);
+    setRowKeys((prev) => ({
+      keys: [...prev.keys, prev.nextKey],
+      nextKey: prev.nextKey + 1,
+    }));
+    onLimitsChange([
+      ...limits,
+      {
+        tokenId: null,
+        enabled: true,
+        tokenBudget: null,
+        periodDays: null,
+        costBudgetDollars: null,
+      },
+    ]);
   }
 
   function removeLimit(index: number) {
-    keysRef.current = keysRef.current.filter((_, i) => i !== index);
+    setRowKeys((prev) => ({
+      keys: prev.keys.filter((_, i) => i !== index),
+      nextKey: prev.nextKey,
+    }));
     onLimitsChange(limits.filter((_, i) => i !== index));
   }
 
   function updateLimit(
     index: number,
-    field: keyof TokenLimit,
+    field: TokenLimitValueField,
     value: number | null
   ) {
     onLimitsChange(
@@ -90,7 +128,7 @@ function TokenLimitSection({
         <Disabled disabled={disabled} tooltip={disabledTooltip}>
           <Card>
             <Section
-              gap={0.5}
+              gap={2}
               height="auto"
               alignItems="stretch"
               justifyContent="start"
@@ -103,7 +141,15 @@ function TokenLimitSection({
                     Token Limit
                   </Text>
                   <Text mainUiMuted text03 className="ml-0.5">
-                    (thousand tokens)
+                    (thousands)
+                  </Text>
+                </div>
+                <div className="flex-1 flex items-center min-w-[160px]">
+                  <Text mainUiAction text04>
+                    Cost Limit
+                  </Text>
+                  <Text mainUiMuted text03 className="ml-0.5">
+                    (USD)
                   </Text>
                 </div>
                 <div className="flex-1 flex items-center min-w-[160px]">
@@ -118,16 +164,23 @@ function TokenLimitSection({
 
               {/* Limit rows */}
               {limits.map((limit, i) => (
-                <div
-                  key={keysRef.current[i]}
-                  className="flex items-center gap-1"
-                >
+                <div key={rowKeys.keys[i]} className="flex items-center gap-1">
                   <div className="flex-1">
                     <InputNumber
                       value={limit.tokenBudget}
                       onChange={(v) => updateLimit(i, "tokenBudget", v)}
-                      min={0}
-                      placeholder="Token limit in thousands"
+                      min={1}
+                      placeholder="Token limit (thousands)"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <InputNumber
+                      value={limit.costBudgetDollars}
+                      onChange={(v) => updateLimit(i, "costBudgetDollars", v)}
+                      min={0.01}
+                      step={0.01}
+                      decimalPlaces={2}
+                      placeholder="Cost limit"
                     />
                   </div>
                   <div className="flex-1">

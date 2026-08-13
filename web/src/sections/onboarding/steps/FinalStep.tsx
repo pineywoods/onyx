@@ -23,14 +23,14 @@ const FinalStepItem = React.memo(
       : {};
 
     return (
-      <Card padding={0.25} variant="secondary">
+      <Card padding={1} variant="secondary">
         <ContentAction
           icon={Icon}
           title={title}
           description={description}
           sizePreset="main-ui"
           variant="section"
-          padding="sm"
+          padding={1}
           rightChildren={
             <Link href={buttonHref as Route} {...linkProps}>
               <Button prominence="tertiary" rightIcon={SvgExternalLink}>
@@ -47,7 +47,7 @@ FinalStepItem.displayName = "FinalStepItem";
 
 export default function FinalStep() {
   return (
-    <Section gap={0.5}>
+    <Section gap={2}>
       {FINAL_SETUP_CONFIG.map((item) => (
         <FinalStepItem key={item.title} {...item} />
       ))}

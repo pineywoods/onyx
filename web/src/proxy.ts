@@ -106,10 +106,12 @@ export const config = {
 const EE_ROUTES = [
   "/admin/groups",
   "/admin/performance/usage",
+  "/admin/performance/analytics",
   "/admin/performance/query-history",
   "/admin/theme",
   "/admin/performance/custom-analytics",
   "/admin/standard-answer",
+  "/admin/export-logs",
   "/agents/stats",
 ];
 

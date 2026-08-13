@@ -18,7 +18,7 @@ import {
   type BuildFile,
   UploadFileStatus,
 } from "@/app/craft/contexts/UploadFilesContext";
-import { getAppTypeLogo } from "@/app/craft/v1/apps/registry";
+import { pickerEntryIcon } from "@/lib/skills/pickerIcons";
 import { pickerEntryKey, type PickerEntry } from "@/lib/skills/picker";
 
 interface InputChipProps {
@@ -131,8 +131,7 @@ interface EntryChipProps {
 }
 
 function EntryChip({ entry, onRemove, onClick }: EntryChipProps) {
-  const Logo = entry.kind === "app" ? getAppTypeLogo(entry.appType) : null;
-  const Icon = Logo ?? SvgSparkle;
+  const Icon = pickerEntryIcon(entry);
 
   return (
     <InputChip
@@ -179,8 +178,11 @@ export function InputChipStrip({
       {hasContent && (
         <motion.div
           key="chip-strip"
+          // oxlint-disable-next-line react-doctor/no-layout-property-animation -- height 0/auto must reflow the input bar, transform cannot
           initial={{ height: 0, opacity: 0 }}
+          // oxlint-disable-next-line react-doctor/no-layout-property-animation -- height 0/auto must reflow the input bar, transform cannot
           animate={{ height: "auto", opacity: 1 }}
+          // oxlint-disable-next-line react-doctor/no-layout-property-animation -- height 0/auto must reflow the input bar, transform cannot
           exit={{ height: 0, opacity: 0 }}
           transition={stripTransition}
           style={{ overflow: "hidden" }}

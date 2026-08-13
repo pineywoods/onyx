@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { Message } from "@/app/app/interfaces";
 import { OnyxDocument, MinimalOnyxDocument } from "@/lib/search/interfaces";
 import HumanMessage from "@/app/app/message/HumanMessage";
@@ -23,7 +23,10 @@ import {
 import { cn } from "@opal/utils";
 
 /** Width constraint for normal (non-multi-model) messages. */
-const MSG_MAX_W = "max-w-[720px] min-w-[400px]";
+// Reading-width cap only applies at md and up — below that the window is too
+// narrow for it to matter, so chat is always full width (and the top-bar
+// toggle is hidden).
+const MSG_MAX_W = "md:max-w-[720px] md:min-w-[400px]";
 
 export interface ChatUIProps {
   liveAgent: MinimalAgent;
@@ -103,10 +106,13 @@ const ChatUI = React.memo(
     const deepResearchEnabledRef = useRef(deepResearchEnabled);
     const currentMessageFilesRef = useRef(currentMessageFiles);
     const selectedModelsRef = useRef(selectedModels);
-    onSubmitRef.current = onSubmit;
-    deepResearchEnabledRef.current = deepResearchEnabled;
-    currentMessageFilesRef.current = currentMessageFiles;
-    selectedModelsRef.current = selectedModels;
+
+    useEffect(() => {
+      onSubmitRef.current = onSubmit;
+      deepResearchEnabledRef.current = deepResearchEnabled;
+      currentMessageFilesRef.current = currentMessageFiles;
+      selectedModelsRef.current = selectedModels;
+    }, [onSubmit, deepResearchEnabled, currentMessageFiles, selectedModels]);
 
     const createRegenerator = useCallback(
       (regenerationRequest: {
@@ -166,7 +172,7 @@ const ChatUI = React.memo(
         <div
           className={cn(
             "flex flex-col w-full h-full pt-4 pb-8 gap-12",
-            !fullWidthChat && "pr-1"
+            !fullWidthChat && "md:pr-1"
           )}
         >
           {messages.map((message, i) => {

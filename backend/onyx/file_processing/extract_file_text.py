@@ -70,7 +70,7 @@ def get_markitdown_converter() -> "MarkItDown":
         # unindexable.
         from markitdown.converters._pptx_converter import PptxConverter
 
-        setattr(
+        setattr(  # noqa: B010
             PptxConverter,
             "_convert_chart_to_markdown",
             lambda self, chart: "\n\n[chart omitted]\n\n",  # noqa: ARG005
@@ -679,7 +679,7 @@ def _load_readonly_workbook(file: IO[Any], file_name: str) -> openpyxl.Workbook 
     / known-openpyxl-bug cases the xlsx indexers treat as skip-and-continue rather
     than a hard failure."""
     try:
-        return openpyxl.load_workbook(file, read_only=True)
+        return openpyxl.load_workbook(file, read_only=True, data_only=True)
     except BadZipFile as e:
         error_str = f"Failed to extract text from {file_name or 'xlsx file'}: {e}"
         if file_name.startswith("~"):

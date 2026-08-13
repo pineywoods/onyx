@@ -8,6 +8,11 @@ from fastapi.datastructures import Headers
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from onyx.chat.incognito import (
+    incognito_allowed_for_user,
+    resolve_incognito_record_mode,
+)
+from onyx.chat.incognito_context import incognito_context_available
 from onyx.chat.models import (
     ChatHistoryResult,
     ChatLoadedFile,
@@ -28,6 +33,11 @@ from onyx.db.chat import (
     get_chat_messages_by_session,
     get_or_create_root_message,
 )
+from onyx.db.enums import (
+    IncognitoRecordMode,
+    UserFileStatus,
+    record_mode_persists_content,
+)
 from onyx.db.file_record import FileRecordNotFoundError
 from onyx.db.kg_config import (
     get_kg_config_settings,
@@ -37,6 +47,9 @@ from onyx.db.models import ChatMessage, ChatSession, Persona, User, UserFile
 from onyx.db.models import SearchDoc as DbSearchDoc
 from onyx.db.persona import user_can_access_persona
 from onyx.db.projects import check_project_ownership
+from onyx.db.user_file import get_user_file_by_id
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import ChatFileType, FileDescriptor
@@ -68,6 +81,20 @@ class FileContextResult(BaseModel):
     tool_metadata: FileToolMetadata
 
 
+CONTENT_PENDING_NOTICE = (
+    "[This file is still being processed and its contents are not yet "
+    "available. Do not guess what it contains — tell the user the file is "
+    "still processing and to ask again in a moment.]"
+)
+
+CONTENT_UNAVAILABLE_NOTICE = (
+    "[No machine-readable text could be extracted from this file. It is "
+    "likely image-only (e.g. a scanned document) or in an unsupported "
+    "format. Its contents are not available to you — do not guess them. If "
+    "needed, ask the user for a text-based copy.]"
+)
+
+
 def build_file_context(
     tool_file_id: str,
     filename: str,
@@ -75,6 +102,7 @@ def build_file_context(
     content_text: str | None = None,
     token_count: int = 0,
     approx_char_count: int | None = None,
+    content_pending: bool = False,
 ) -> FileContextResult:
     """Build the LLM context representation for a single file.
 
@@ -87,6 +115,20 @@ def build_file_context(
             "Use the file_reader or python tools to access "
             "this file's contents."
         )
+        message = ChatMessageSimple(
+            message=message_text,
+            token_count=max(1, len(message_text) // 4),
+            message_type=MessageType.USER,
+            file_id=tool_file_id,
+        )
+    elif not (content_text or "").strip():
+        # An empty file block gives the model nothing to go on, and it tends
+        # to invent workarounds (search the web for the document, guess its
+        # contents). Say explicitly why there is no content.
+        notice = (
+            CONTENT_PENDING_NOTICE if content_pending else CONTENT_UNAVAILABLE_NOTICE
+        )
+        message_text = f"File: {filename}\n{notice}\nEnd of File"
         message = ChatMessageSimple(
             message=message_text,
             token_count=max(1, len(message_text) // 4),
@@ -154,13 +196,46 @@ def create_chat_session_from_request(
         ):
             raise ValueError("User does not have access to persona")
 
-    return create_chat_session(
+    # Pinned at creation so a later setting change cannot alter a live session.
+    # Availability decides server-side, never the client flag. A refusal
+    # errors: degrading would silently persist a believed-incognito chat.
+    # The capability is checked first so a deployment that cannot hold the
+    # context says so, rather than reporting it as a permission the admin
+    # could grant.
+    incognito_mode: IncognitoRecordMode | None = None
+    if chat_session_request.incognito:
+        if not incognito_context_available():
+            raise OnyxError(
+                OnyxErrorCode.DEPLOYMENT_UNSUPPORTED,
+                "Incognito chat is not supported on this deployment.",
+            )
+        if not incognito_allowed_for_user(user, db_session, cached=False):
+            raise OnyxError(
+                OnyxErrorCode.UNAUTHORIZED,
+                "Incognito chat is not enabled for this user.",
+            )
+        incognito_mode = resolve_incognito_record_mode()
+
+    # A caller-supplied title is conversation-derived, so a content-free
+    # session stores none of it.
+    description = (
+        chat_session_request.description or ""
+        if record_mode_persists_content(incognito_mode)
+        else ""
+    )
+
+    chat_session = create_chat_session(
         db_session=db_session,
-        description=chat_session_request.description or "",
+        description=description,
         user_id=user.id,
         persona_id=chat_session_request.persona_id,
         project_id=chat_session_request.project_id,
+        incognito_record_mode=incognito_mode,
+        session_id=(
+            chat_session_request.incognito_session_id if incognito_mode else None
+        ),
     )
+    return chat_session
 
 
 def create_chat_history_chain(
@@ -373,6 +448,7 @@ def process_kg_commands(
 def _get_or_extract_plaintext(
     file_id: str,
     extract_fn: Callable[[], str],
+    store_on_miss: bool = True,
 ) -> str:
     """Load cached plaintext for a file, or extract and store it.
 
@@ -396,9 +472,12 @@ def _get_or_extract_plaintext(
     # don't get re-fetched from object storage and re-attempted on every
     # subsequent chat turn.  Transient extraction errors surface as raised
     # exceptions, not empty returns, so they propagate without poisoning the
-    # cache.
+    # cache.  Callers pass store_on_miss=False when another writer owns the
+    # canonical plaintext for this key (e.g. the user-file worker, whose
+    # result may include image captions this inline extraction can't produce).
     content_text = extract_fn()
-    store_plaintext(file_id, content_text)
+    if store_on_miss:
+        store_plaintext(file_id, content_text)
     return content_text
 
 
@@ -426,6 +505,21 @@ def load_chat_file(
     file_type = ChatFileType(file_descriptor["type"])
     filename = file_descriptor.get("name")
 
+    # Look up the UserFile row first (when one exists) — it supplies the token
+    # count and tells us whether the user-file worker is still processing.
+    user_file_id_str = file_descriptor.get("user_file_id", "")
+    user_file: UserFile | None = None
+    if user_file_id_str:
+        try:
+            user_file = get_user_file_by_id(UUID(user_file_id_str), db_session)
+        except (ValueError, TypeError) as e:
+            logger.warning("Failed to look up user file for %s: %s", file_id, e)
+    token_count = user_file.token_count if user_file and user_file.token_count else 0
+    content_pending = user_file is not None and user_file.status in (
+        UserFileStatus.PROCESSING,
+        UserFileStatus.INDEXING,
+    )
+
     # Extract text content if it's a text file type (not an image). The
     # cached-plaintext path avoids reading the original bytes on the steady
     # state; only the cache miss branch opens the binary stream.
@@ -444,31 +538,21 @@ def load_chat_file(
         # Use the user_file_id as cache key when available (matches what
         # the celery indexing worker stores), otherwise fall back to the
         # file store id (covers code-interpreter-generated files, etc.).
-        user_file_id_str = file_descriptor.get("user_file_id")
         cache_key = user_file_id_str or file_id
 
         try:
-            content_text = _get_or_extract_plaintext(cache_key, _extract)
+            # While the worker is still processing, don't store the inline
+            # extraction under its key: the worker's canonical plaintext (which
+            # may include image captions) should be what later turns read.
+            content_text = _get_or_extract_plaintext(
+                cache_key, _extract, store_on_miss=not content_pending
+            )
         except Exception as e:
             logger.warning(
                 "Failed to retrieve content for file %s: %s",
                 file_id,
                 str(e),
             )
-
-    # Get token count from UserFile if available
-    token_count = 0
-    user_file_id_str = file_descriptor.get("user_file_id")
-    if user_file_id_str:
-        try:
-            user_file_id = UUID(user_file_id_str)
-            user_file = (
-                db_session.query(UserFile).filter(UserFile.id == user_file_id).first()
-            )
-            if user_file and user_file.token_count:
-                token_count = user_file.token_count
-        except (ValueError, TypeError) as e:
-            logger.warning("Failed to get token count for file %s: %s", file_id, e)
 
     def _load_content() -> bytes:
         # Chat messages keep file references in their JSONB `files` column, but
@@ -504,6 +588,7 @@ def load_chat_file(
         content_text=content_text,
         token_count=token_count,
         loader=_load_content,
+        content_pending=content_pending,
     )
 
 
@@ -700,6 +785,7 @@ def convert_chat_history(
                     file_type=text_file.file_type,
                     content_text=text_file.content_text,
                     token_count=text_file.token_count,
+                    content_pending=text_file.content_pending,
                 )
                 simple_messages.append(ctx.message)
                 all_injected_file_metadata[tool_id] = ctx.tool_metadata
@@ -734,6 +820,7 @@ def convert_chat_history(
                     token_count=chat_message.token_count + image_token_count,
                     message_type=MessageType.USER,
                     image_files=image_files if image_files else None,
+                    image_token_count=image_token_count,
                 )
             )
 
@@ -800,11 +887,7 @@ def convert_chat_history(
                         simple_messages.append(
                             ChatMessageSimple(
                                 message=tool_response_message,
-                                token_count=(
-                                    token_counter(tool_response_message)
-                                    if tool_name == IMAGE_GENERATION_TOOL_NAME
-                                    else 20
-                                ),
+                                token_count=token_counter(tool_response_message),
                                 message_type=MessageType.TOOL_CALL_RESPONSE,
                                 tool_call_id=tool_call.tool_call_id,
                                 image_files=None,

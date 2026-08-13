@@ -100,14 +100,14 @@ export default function MultiModelPanel({
       <ContentAction
         sizePreset="main-ui"
         variant="body"
-        padding="lg"
+        padding={2}
         icon={ModelIcon}
         title={isHidden ? markdown(`~~${displayName}~~`) : displayName}
         rightChildren={
           readOnly ? (
             isPreferred ? (
               <div className="flex items-center px-2">
-                <span className="text-action-link-05 shrink-0">
+                <span className="text-action-selection-05 shrink-0">
                   <Text font="secondary-body" color="inherit" nowrap>
                     Preferred Response
                   </Text>
@@ -118,7 +118,7 @@ export default function MultiModelPanel({
             <div className="flex items-center gap-1 px-2">
               {isPreferred && (
                 <>
-                  <span className="text-action-link-05 shrink-0">
+                  <span className="text-action-selection-05 shrink-0">
                     <Text font="secondary-body" color="inherit" nowrap>
                       Preferred Response
                     </Text>

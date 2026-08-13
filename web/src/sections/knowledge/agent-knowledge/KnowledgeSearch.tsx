@@ -54,7 +54,7 @@ export function KnowledgeSearchBar({
     <GeneralLayouts.Section
       flexDirection="row"
       alignItems="center"
-      gap={0.25}
+      gap={1}
       height="auto"
     >
       {isSearchMode ? (
@@ -126,7 +126,7 @@ export function KnowledgeSearchSidebar({
         onClick={() => onSourceFilterClick(null)}
         rightChildren={
           totalCount > 0 ? (
-            <Text mainUiAction className="text-action-link-05">
+            <Text mainUiAction className="text-action-selection-05">
               {totalCount}
             </Text>
           ) : undefined
@@ -148,7 +148,7 @@ export function KnowledgeSearchSidebar({
               onClick={() => onSourceFilterClick(cs.source)}
               rightChildren={
                 count > 0 ? (
-                  <Text mainUiAction className="text-action-link-05">
+                  <Text mainUiAction className="text-action-selection-05">
                     {count}
                   </Text>
                 ) : undefined
@@ -194,7 +194,7 @@ export function KnowledgeSearchResultsPanel({
       <GeneralLayouts.Section
         alignItems="center"
         justifyContent="center"
-        gap={0.5}
+        gap={2}
         aria-label="search-empty-state"
       >
         <SvgSearch size={32} className="stroke-text-04" />
@@ -224,7 +224,7 @@ export function KnowledgeSearchResultsPanel({
       <GeneralLayouts.Section
         alignItems="center"
         justifyContent="center"
-        gap={0.5}
+        gap={2}
         aria-label="search-error"
       >
         <Text secondaryBody text03>
@@ -249,7 +249,7 @@ export function KnowledgeSearchResultsPanel({
       <GeneralLayouts.Section
         alignItems="center"
         justifyContent="center"
-        gap={0.5}
+        gap={2}
         aria-label="search-no-results"
       >
         <Text secondaryBody text03>
@@ -276,7 +276,7 @@ export function KnowledgeSearchResultsPanel({
           </TableLayouts.TableCell>
         </TableLayouts.TableRow>
 
-        <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+        <Divider paddingParallel={0} paddingPerpendicular={0} />
 
         <div className="overflow-y-auto max-h-80">
           {allResults.map((entry) => {
@@ -303,7 +303,7 @@ export function KnowledgeSearchResultsPanel({
                       flexDirection="row"
                       justifyContent="start"
                       alignItems="center"
-                      gap={0.25}
+                      gap={1}
                       height="auto"
                     >
                       <SvgFolder size={16} />
@@ -368,7 +368,7 @@ export function KnowledgeSearchResultsPanel({
                     flexDirection="row"
                     justifyContent="start"
                     alignItems="center"
-                    gap={0.25}
+                    gap={1}
                     height="auto"
                   >
                     <SvgFileText size={16} />

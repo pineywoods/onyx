@@ -34,13 +34,13 @@ export default function ScimSyncCard({
   onRegenerate,
 }: ScimSyncCardProps) {
   return (
-    <Card gap={0.75}>
+    <Card gap={3}>
       <ContentAction
         title="SCIM Sync"
         description="Connect your identity provider to import and sync users and groups."
         sizePreset="main-ui"
         variant="section"
-        padding="fit"
+        padding={0}
         rightChildren={
           hasToken ? (
             <Button
@@ -65,13 +65,13 @@ export default function ScimSyncCard({
 
       {hasToken && (
         <>
-          <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+          <Divider paddingParallel={0} paddingPerpendicular={0} />
 
           <Section
             flexDirection="row"
             justifyContent="between"
             alignItems="end"
-            gap={1}
+            gap={4}
           >
             <Section alignItems="start" gap={0} width="fit">
               {isConnected ? (

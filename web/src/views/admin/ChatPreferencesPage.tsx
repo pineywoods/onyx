@@ -1,7 +1,13 @@
 "use client";
 
 import { markdown } from "@opal/utils";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { Formik, Form } from "formik";
 import useSWR, { mutate } from "swr";
@@ -13,6 +19,8 @@ import SimpleCollapsible from "@/refresh-components/SimpleCollapsible";
 import InputTextAreaField from "@/refresh-components/form/InputTextAreaField";
 import { InputTextArea, InputTypeIn } from "@opal/components";
 import InputSelect from "@/refresh-components/inputs/InputSelect";
+import ModelSelector from "@/sections/model-selector/ModelSelector";
+import { useAdminLLMProviders } from "@/lib/languageModels/hooks";
 import {
   SvgAddLines,
   SvgActions,
@@ -120,10 +128,10 @@ function MCPServerCard({
       expanded={expanded}
       border="solid"
       rounding="lg"
-      padding="sm"
+      padding={2}
       expandedContent={
         hasContent ? (
-          <Section gap={0.5} padding={0.5}>
+          <Section gap={2} padding={2}>
             {filteredTools.map((tool) => (
               <Card key={tool.id} border="solid" rounding="md">
                 <InputHorizontal
@@ -151,7 +159,7 @@ function MCPServerCard({
       <CardLayout.Header
         bottomChildren={
           tools.length > 0 ? (
-            <Section flexDirection="row" gap={0.5}>
+            <Section flexDirection="row" gap={2}>
               <InputTypeIn
                 placeholder="Search tools..."
                 variant="internal"
@@ -178,7 +186,7 @@ function MCPServerCard({
             description={server.description}
             sizePreset="main-ui"
             variant="section"
-            padding="fit"
+            padding={0}
             rightChildren={
               <Tooltip tooltip={authTooltip} side="top">
                 <Switch
@@ -578,7 +586,7 @@ function RetentionField({ value, disabled, onSave }: RetentionFieldProps) {
               disabled ? "disabled" : customInvalid ? "error" : undefined
             }
             rightChildren={
-              <Section flexDirection="row" gap={0.125} width="fit" height="fit">
+              <Section flexDirection="row" gap={0.5} width="fit" height="fit">
                 <Button
                   icon={SvgRevert}
                   tooltip="Restore Default"
@@ -648,6 +656,86 @@ export default function ChatPreferencesPage() {
   // Search Mode toggle is Business+; Chat Retention is Enterprise-only.
   const businessTier = useTierAtLeast(Tier.BUSINESS);
   const enterpriseTier = useTierAtLeast(Tier.ENTERPRISE);
+
+  // Dedicated chat-naming model. Auto-naming reads this designation via
+  // fetch_default_chat_naming_model; when unset it uses the session's model.
+  const {
+    llmProviders,
+    defaultChatNaming,
+    refetch: refetchLlmProviders,
+  } = useAdminLLMProviders();
+
+  // Resolve defaultChatNaming (id + name based) to a model_configuration_id
+  // for ModelSelector.
+  const chatNamingModelConfigId = useMemo(() => {
+    if (!defaultChatNaming || !llmProviders) return null;
+    for (const p of llmProviders) {
+      if (p.id !== defaultChatNaming.provider_id) continue;
+      const mc = p.model_configurations.find(
+        (m) => m.name === defaultChatNaming.model_name
+      );
+      if (mc?.id != null) return mc.id;
+    }
+    return null;
+  }, [llmProviders, defaultChatNaming]);
+
+  const handleChatNamingModelChange = useCallback(
+    async ({
+      modelName,
+      providerName,
+    }: {
+      modelName: string;
+      providerName: string | null;
+    }) => {
+      const provider = llmProviders?.find((p) => p.name === providerName);
+      if (!provider) {
+        toast.error("Could not resolve provider");
+        return;
+      }
+      try {
+        const response = await fetch("/api/admin/llm/default-chat-naming", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider_id: provider.id,
+            model_name: modelName,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(
+            (await response.json()).detail ??
+              "Failed to update chat naming model"
+          );
+        }
+        await refetchLlmProviders();
+        toast.success("Chat naming model updated");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "An unknown error occurred"
+        );
+      }
+    },
+    [llmProviders, refetchLlmProviders]
+  );
+
+  const handleClearChatNamingModel = useCallback(async () => {
+    try {
+      const response = await fetch("/api/admin/llm/default-chat-naming", {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error(
+          (await response.json()).detail ?? "Failed to reset chat naming model"
+        );
+      }
+      await refetchLlmProviders();
+      toast.success("Chat naming reset to the session's model");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "An unknown error occurred"
+      );
+    }
+  }, [refetchLlmProviders]);
 
   // Local state for text fields (save-on-blur)
   const [companyName, setCompanyName] = useState(s.company_name ?? "");
@@ -802,7 +890,7 @@ export default function ChatPreferencesPage() {
 
       try {
         const response = await fetch("/api/admin/settings", {
-          method: "PUT",
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(newSettings),
         });
@@ -934,13 +1022,39 @@ export default function ChatPreferencesPage() {
                   }}
                 />
               </InputHorizontal>
+              <InputHorizontal
+                title="Chat Naming Model"
+                description="Model used to auto-name chat sessions. Defaults to each session's own model — pin a small, fast model here if your main model can't serve concurrent requests."
+                withLabel
+              >
+                <div className="flex items-center gap-2">
+                  {chatNamingModelConfigId !== null && (
+                    <Button
+                      prominence="tertiary"
+                      size="sm"
+                      onClick={() => void handleClearChatNamingModel()}
+                    >
+                      Reset
+                    </Button>
+                  )}
+                  <ModelSelector
+                    value={chatNamingModelConfigId}
+                    onChange={(opt) =>
+                      void handleChatNamingModelChange({
+                        modelName: opt.modelName,
+                        providerName: opt.name,
+                      })
+                    }
+                  />
+                </div>
+              </InputHorizontal>
             </Section>
           </Card>
 
-          <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+          <Divider paddingParallel={0} paddingPerpendicular={0} />
 
           {/* Team Context */}
-          <Section gap={1}>
+          <Section gap={4}>
             <InputVertical
               title="Team Name"
               subDescription="This is added to all chat sessions as additional context to provide a richer/customized experience."
@@ -998,13 +1112,13 @@ export default function ChatPreferencesPage() {
             </Button>
           </InputHorizontal>
 
-          <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+          <Divider paddingParallel={0} paddingPerpendicular={0} />
 
           <Disabled disabled={s.disable_default_assistant ?? false}>
             <div>
-              <Section gap={1.5}>
+              <Section gap={6}>
                 {/* Connectors */}
-                <Section gap={0.75}>
+                <Section gap={3}>
                   <Content
                     title="Connectors"
                     sizePreset="main-content"
@@ -1015,7 +1129,7 @@ export default function ChatPreferencesPage() {
                     flexDirection="row"
                     justifyContent="between"
                     alignItems="center"
-                    gap={0.25}
+                    gap={1}
                   >
                     {uniqueSources.length === 0 ? (
                       <EmptyMessageCard
@@ -1028,13 +1142,13 @@ export default function ChatPreferencesPage() {
                           flexDirection="row"
                           justifyContent="start"
                           alignItems="center"
-                          gap={0.25}
+                          gap={1}
                         >
                           {uniqueSources.slice(0, 3).map((source) => {
                             const meta = getSourceMetadata(source);
                             return (
                               <div key={source} className="w-40">
-                                <Card padding="sm" border="solid">
+                                <Card padding={2} border="solid">
                                   <Content
                                     icon={meta.icon}
                                     title={meta.displayName}
@@ -1065,7 +1179,7 @@ export default function ChatPreferencesPage() {
                     description="Tools and capabilities available for chat to use. This does not apply to agents."
                   />
                   <SimpleCollapsible.Content>
-                    <Section gap={0.5} alignItems="stretch">
+                    <Section gap={2} alignItems="stretch">
                       {vectorDbEnabled && searchTool && (
                         <Card border="solid" rounding="lg">
                           <InputHorizontal
@@ -1210,14 +1324,11 @@ export default function ChatPreferencesPage() {
                     {/* Separator between built-in tools and MCP/OpenAPI tools */}
                     {(mcpServersWithTools.length > 0 ||
                       openApiTools.length > 0) && (
-                      <Divider
-                        paddingPerpendicular="sm"
-                        paddingParallel="fit"
-                      />
+                      <Divider paddingPerpendicular={2} paddingParallel={0} />
                     )}
 
                     {/* MCP Servers & OpenAPI Tools */}
-                    <Section gap={0.5}>
+                    <Section gap={2}>
                       {mcpServersWithTools.map(({ server, tools }) => (
                         <MCPServerCard
                           key={server.id}
@@ -1252,13 +1363,13 @@ export default function ChatPreferencesPage() {
             </div>
           </Disabled>
 
-          <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+          <Divider paddingParallel={0} paddingPerpendicular={0} />
 
           {/* Advanced Options */}
           <SimpleCollapsible defaultOpen={false}>
             <SimpleCollapsible.Header title="Advanced Options" />
             <SimpleCollapsible.Content>
-              <Section gap={1}>
+              <Section gap={4}>
                 <Card border="solid" rounding="lg">
                   <Section alignItems="stretch">
                     <Disabled
@@ -1454,7 +1565,7 @@ export default function ChatPreferencesPage() {
                     onClose={() => setSystemPromptModalOpen(false)}
                   />
                   <Modal.Body>
-                    <Section gap={0.25} alignItems="start">
+                    <Section gap={1} alignItems="start">
                       <Hoverable.Root group="systemPromptRestore" width="full">
                         <InputTextAreaField
                           name="system_prompt"
@@ -1486,7 +1597,7 @@ export default function ChatPreferencesPage() {
                     <MessageCard
                       title="Modify with caution."
                       description="System prompt affects all chats, agents, and projects. Significant changes may degrade response quality."
-                      padding="xs"
+                      padding={1}
                     />
                   </Modal.Body>
                   <Modal.Footer>

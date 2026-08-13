@@ -39,7 +39,7 @@ const OnboardingHeader = React.memo(
     }
 
     return (
-      <Card padding={0.5} data-label="onboarding-header">
+      <Card padding={2} data-label="onboarding-header">
         <ContentAction
           icon={(props) => (
             <SvgProgressCircle value={iconPercentage} {...props} />
@@ -48,7 +48,7 @@ const OnboardingHeader = React.memo(
           sizePreset="main-ui"
           variant="body"
           color="muted"
-          padding="sm"
+          padding={1}
           rightChildren={
             stepButtonText ? (
               <Section flexDirection="row">

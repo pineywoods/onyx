@@ -79,6 +79,9 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 
 const DEFAULT_TOOL_DESCRIPTION = "This action is not configured yet.";
 
+// Stable fallback so absent preferences never churn dependent callbacks.
+const NO_DISABLED_TOOLS: number[] = [];
+
 function getToolTooltip(
   tool: ToolSnapshot,
   isConfigured: boolean,
@@ -281,30 +284,43 @@ export default function ActionsPopover({
   const hasNoConnectors = ccPairs.length === 0;
 
   const agentPreference = agentPreferences?.[selectedAgent.id];
-  const disabledToolIds = agentPreference?.disabled_tool_ids || [];
-  const toggleToolForCurrentAgent = (toolId: number) => {
-    const disabled = disabledToolIds.includes(toolId);
-    setSpecificAgentPreferences(selectedAgent.id, {
-      disabled_tool_ids: disabled
-        ? disabledToolIds.filter((id) => id !== toolId)
-        : [...disabledToolIds, toolId],
-    });
+  const disabledToolIds =
+    agentPreference?.disabled_tool_ids || NO_DISABLED_TOOLS;
+  const toggleToolForCurrentAgent = useCallback(
+    (toolId: number) => {
+      const disabled = disabledToolIds.includes(toolId);
+      setSpecificAgentPreferences(selectedAgent.id, {
+        disabled_tool_ids: disabled
+          ? disabledToolIds.filter((id) => id !== toolId)
+          : [...disabledToolIds, toolId],
+      });
 
-    // If we're disabling a tool that is currently forced, remove it from forced tools
-    if (!disabled && forcedToolIds.includes(toolId)) {
-      setForcedToolIds(forcedToolIds.filter((id) => id !== toolId));
-    }
-  };
+      // If we're disabling a tool that is currently forced, remove it from forced tools
+      if (!disabled && forcedToolIds.includes(toolId)) {
+        setForcedToolIds(forcedToolIds.filter((id) => id !== toolId));
+      }
+    },
+    [
+      disabledToolIds,
+      selectedAgent.id,
+      setSpecificAgentPreferences,
+      forcedToolIds,
+      setForcedToolIds,
+    ]
+  );
 
-  const toggleForcedTool = (toolId: number) => {
-    if (forcedToolIds.includes(toolId)) {
-      // If clicking on already forced tool, unforce it
-      setForcedToolIds([]);
-    } else {
-      // If clicking on a new tool, replace any existing forced tools with just this one
-      setForcedToolIds([toolId]);
-    }
-  };
+  const toggleForcedTool = useCallback(
+    (toolId: number) => {
+      if (forcedToolIds.includes(toolId)) {
+        // If clicking on already forced tool, unforce it
+        setForcedToolIds([]);
+      } else {
+        // If clicking on a new tool, replace any existing forced tools with just this one
+        setForcedToolIds([toolId]);
+      }
+    },
+    [forcedToolIds, setForcedToolIds]
+  );
 
   // Get internal search tool reference for auto-pin logic
   const internalSearchTool = useMemo(
@@ -492,7 +508,8 @@ export default function ActionsPopover({
   // Handle MCP authentication
   const handleMCPAuthenticate = async (
     serverId: number,
-    authType: MCPAuthenticationType
+    authType: MCPAuthenticationType,
+    forceReauthentication = false
   ) => {
     if (authType === MCPAuthenticationType.OAUTH) {
       const updateLoadingState = (loading: boolean) => {
@@ -522,18 +539,19 @@ export default function ActionsPopover({
             server_id: serverId,
             return_path: window.location.pathname + window.location.search,
             include_resource_param: true,
+            force_reauthentication: forceReauthentication,
           }),
         });
 
-        if (response.ok) {
-          const { oauth_url } = await response.json();
-          window.location.href = oauth_url;
-        } else {
-          updateLoadingState(false);
+        if (!response.ok) {
+          throw new Error("Failed to start MCP OAuth");
         }
+        const { oauth_url } = await response.json();
+        window.location.href = oauth_url;
       } catch (error) {
         console.error("Error initiating OAuth:", error);
         updateLoadingState(false);
+        throw error;
       }
     }
   };
@@ -591,26 +609,45 @@ export default function ActionsPopover({
     }
   };
 
-  const handleServerAuthentication = (server: MCPServer) => {
+  const handleServerAuthentication = (
+    server: MCPServer,
+    forceReauthentication = false
+  ) => {
     const authType = server.auth_type;
     const performer = server.auth_performer;
+    const requiresHeaderValues =
+      (server.auth_template?.required_fields.length ?? 0) > 0;
 
+    if (!requiresHeaderValues && authType === MCPAuthenticationType.OAUTH) {
+      void handleMCPAuthenticate(
+        server.id,
+        MCPAuthenticationType.OAUTH,
+        forceReauthentication
+      ).catch(() => undefined);
+      return;
+    }
     if (
-      authType === MCPAuthenticationType.NONE ||
-      performer === MCPAuthenticationPerformer.ADMIN
+      !requiresHeaderValues &&
+      (authType === MCPAuthenticationType.NONE ||
+        performer === MCPAuthenticationPerformer.ADMIN)
     ) {
       return;
     }
-
-    if (authType === MCPAuthenticationType.OAUTH) {
-      handleMCPAuthenticate(server.id, MCPAuthenticationType.OAUTH);
-    } else if (authType === MCPAuthenticationType.API_TOKEN) {
+    if (requiresHeaderValues || authType === MCPAuthenticationType.API_TOKEN) {
       setMcpApiKeyModal({
         isOpen: true,
         serverId: server.id,
         serverName: server.name,
         authTemplate: server.auth_template,
-        onSuccess: () => {
+        onSuccess: async () => {
+          if (authType === MCPAuthenticationType.OAUTH) {
+            await handleMCPAuthenticate(
+              server.id,
+              MCPAuthenticationType.OAUTH,
+              forceReauthentication
+            );
+            return;
+          }
           // Update the authentication state after successful credential submission
           setMcpServerData((prev) => ({
             ...prev,
@@ -706,7 +743,7 @@ export default function ActionsPopover({
 
   const handleFooterReauthClick = () => {
     if (selectedMcpServer) {
-      handleServerAuthentication(selectedMcpServer);
+      handleServerAuthentication(selectedMcpServer, true);
     }
   };
 
@@ -720,13 +757,11 @@ export default function ActionsPopover({
 
   const mcpFooter = showActiveReauthRow ? (
     <LineItem
+      disabled={selectedMcpServerData?.isLoading}
       onClick={handleFooterReauthClick}
       icon={selectedMcpServerData?.isLoading ? SvgSimpleLoader : SvgKey}
-      rightChildren={
-        <Button icon={SvgChevronRight} prominence="tertiary" size="sm" />
-      }
     >
-      Re-Authenticate
+      Re-authenticate
     </LineItem>
   ) : undefined;
 

@@ -20,7 +20,7 @@ from onyx.db.llm import (
 from onyx.db.models import LLMProvider as LLMProviderModel
 from onyx.db.models import Persona, SearchSettings, User
 from onyx.llm.constants import LlmProviderNames
-from onyx.llm.interfaces import LLM
+from onyx.llm.interfaces import LLM, LlmRequestPolicy
 from onyx.llm.multi_llm import LitellmLLM
 from onyx.llm.override_models import LLMOverride
 from onyx.llm.utils import (
@@ -93,12 +93,30 @@ def _resolve_provider_and_model(
     provider_name_override: str | None,
     model_version_override: str | None,
     db_session: Session,
+    model_configuration_override_id: int | None = None,
 ) -> tuple[LLMProviderModel, str] | None:
     """Resolve the (provider, model_name) pair for get_llm_for_persona.
 
     Returns None when the override provider doesn't exist or the persona's
     configured model config is missing; the caller falls back to the default.
     """
+    # Provider display names are not unique, so an explicit model
+    # configuration id beats name-based resolution. A stale id (deleted
+    # configuration) falls back to the default LLM — never to a name lookup,
+    # which could silently pick a different same-named provider.
+    if model_configuration_override_id is not None:
+        mc = fetch_model_configuration_by_id(
+            db_session, model_configuration_override_id
+        )
+        if mc is not None and mc.llm_provider is not None:
+            return mc.llm_provider, mc.name
+        logger.warning(
+            "llm_override.model_configuration_id=%s not found; falling back to"
+            " the default LLM.",
+            model_configuration_override_id,
+        )
+        return None
+
     if provider_name_override:
         provider_model = fetch_existing_llm_provider(provider_name_override, db_session)
         if not provider_model:
@@ -137,29 +155,40 @@ def get_llm_for_persona(
     user: User,
     llm_override: LLMOverride | None = None,
     additional_headers: dict[str, str] | None = None,
+    policy_fn: Callable[[str], LlmRequestPolicy] | None = None,
 ) -> LLM:
     """Get the appropriate LLM for a persona, with the following priority:
-    1. LLM override (provider + model version)
+    1. LLM override (model configuration id, else provider + model version)
     2. Persona's model configuration override
     3. Default LLM
     """
     if persona is None:
         logger.warning("No persona provided, using default LLM")
-        return get_default_llm()
+        return get_default_llm(policy_fn=policy_fn)
 
+    mc_id_override = llm_override.model_configuration_id if llm_override else None
     provider_name_override = llm_override.model_provider if llm_override else None
     model_version_override = llm_override.model_version if llm_override else None
     temperature_override = llm_override.temperature if llm_override else None
 
-    if not provider_name_override and not persona.default_model_configuration_id:
+    if (
+        mc_id_override is None
+        and not provider_name_override
+        and not persona.default_model_configuration_id
+    ):
         return get_default_llm(
             temperature=temperature_override or GEN_AI_TEMPERATURE,
             additional_headers=additional_headers,
+            policy_fn=policy_fn,
         )
 
     with get_session_with_current_tenant() as db_session:
         resolved = _resolve_provider_and_model(
-            persona, provider_name_override, model_version_override, db_session
+            persona,
+            provider_name_override,
+            model_version_override,
+            db_session,
+            model_configuration_override_id=mc_id_override,
         )
         if resolved is None:
             return get_default_llm(
@@ -169,6 +198,7 @@ def get_llm_for_persona(
                     else GEN_AI_TEMPERATURE
                 ),
                 additional_headers=additional_headers,
+                policy_fn=policy_fn,
             )
         provider_model, model = resolved
 
@@ -186,6 +216,7 @@ def get_llm_for_persona(
             return get_default_llm(
                 temperature=temperature_override or GEN_AI_TEMPERATURE,
                 additional_headers=additional_headers,
+                policy_fn=policy_fn,
             )
 
         llm_provider = LLMProviderView.from_model(provider_model)
@@ -195,6 +226,7 @@ def get_llm_for_persona(
         llm_provider=llm_provider,
         temperature=temperature_override,
         additional_headers=additional_headers,
+        policy_fn=policy_fn,
     )
 
 
@@ -305,6 +337,7 @@ def llm_from_provider(
     timeout: int | None = None,
     temperature: float | None = None,
     additional_headers: dict[str, str] | None = None,
+    policy_fn: Callable[[str], LlmRequestPolicy] | None = None,
 ) -> LLM:
     configured_max_input_tokens = _get_model_configured_max_input_tokens(
         llm_provider=llm_provider, model_name=model_name
@@ -320,6 +353,9 @@ def llm_from_provider(
             llm_provider=llm_provider, model_name=model_name
         )
     )
+    # Resolved here, not at the call site: the caller hands policy as a
+    # provider-keyed function because it cannot know which provider wins.
+    policy = policy_fn(llm_provider.provider) if policy_fn else None
     return get_llm(
         provider=llm_provider.provider,
         model=model_name,
@@ -333,6 +369,8 @@ def llm_from_provider(
         additional_headers=additional_headers,
         max_input_tokens=max_input_tokens,
         model_kwargs=model_kwargs,
+        policy_headers=policy.headers if policy else None,
+        policy_model_kwargs=policy.model_kwargs if policy else None,
     )
 
 
@@ -368,6 +406,7 @@ def get_default_llm(
     timeout: int | None = None,
     temperature: float | None = None,
     additional_headers: dict[str, str] | None = None,
+    policy_fn: Callable[[str], LlmRequestPolicy] | None = None,
 ) -> LLM:
     with get_session_with_current_tenant() as db_session:
         model = fetch_default_llm_model(db_session)
@@ -381,6 +420,7 @@ def get_default_llm(
             timeout=timeout,
             temperature=temperature,
             additional_headers=additional_headers,
+            policy_fn=policy_fn,
         )
 
 
@@ -397,6 +437,8 @@ def get_llm(
     timeout: int | None = None,
     additional_headers: dict[str, str] | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    policy_headers: dict[str, str] | None = None,
+    policy_model_kwargs: dict[str, Any] | None = None,
 ) -> LLM:
     if temperature is None:
         temperature = GEN_AI_TEMPERATURE
@@ -409,6 +451,16 @@ def get_llm(
     if provider_extra_headers:
         extra_headers.update(provider_extra_headers)
 
+    # Last on purpose: policy headers (e.g. incognito retention suppression)
+    # must win over request, deployment-env, and provider header sources.
+    if policy_headers:
+        extra_headers.update(policy_headers)
+
+    # Same precedence rule for body params (e.g. store=False).
+    merged_model_kwargs = dict(model_kwargs or {})
+    if policy_model_kwargs:
+        merged_model_kwargs.update(policy_model_kwargs)
+
     return LitellmLLM(
         model_provider=provider,
         model_name=model,
@@ -420,7 +472,7 @@ def get_llm(
         temperature=temperature,
         custom_config=custom_config,
         extra_headers=extra_headers,
-        model_kwargs=model_kwargs or {},
+        model_kwargs=merged_model_kwargs,
         max_input_tokens=max_input_tokens,
     )
 

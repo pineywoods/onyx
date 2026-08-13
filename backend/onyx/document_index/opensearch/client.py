@@ -160,9 +160,25 @@ _DOCUMENT_MISSING_ERROR_TYPE = "document_missing_exception"
 _VERSION_CONFLICT_ERROR_TYPE = "version_conflict_engine_exception"
 # Raised by a search whose PIT has expired/been deleted; we re-open and retry.
 _SEARCH_CONTEXT_MISSING_ERROR_TYPE = "search_context_missing"
+# Rejection by an index/cluster block, e.g. the read_only_allow_delete block
+# OpenSearch applies when disk usage crosses the flood-stage watermark.
+_CLUSTER_BLOCK_ERROR_TYPE = "cluster_block_exception"
 # Chunks per PIT-scan page. A port doc-batch is small (INDEX_BATCH_SIZE docs), so
 # one page covers a batch; paging still protects against a pathological doc.
 _PIT_SCAN_PAGE_SIZE = 1000
+
+
+def is_cluster_block_error(e: Exception) -> bool:
+    """True when a request was rejected by an index/cluster block rather than a
+    problem with the request itself."""
+    return isinstance(e, TransportError) and _CLUSTER_BLOCK_ERROR_TYPE in str(e.error)
+
+
+class OpenSearchIndexWriteBlockedError(Exception):
+    """An existing index rejected a metadata write because of a block (e.g.
+    read_only_allow_delete applied at the disk flood-stage watermark). The
+    index is still fully readable — callers that can serve degraded may catch
+    this. Never raised for a missing index or a blocked index creation."""
 
 
 class OpenSearchServerSideTimeout(Exception):
@@ -1155,11 +1171,22 @@ class OpenSearchIndexClient(OpenSearchClient):
                 )
 
     @log_function_time(print_only=True, debug_only=True)
-    def delete_by_query(self, query_body: dict[str, Any]) -> int:
+    def delete_by_query(
+        self,
+        query_body: dict[str, Any],
+        refresh: bool = False,
+        max_docs: int | None = None,
+    ) -> int:
         """Deletes documents by a query.
 
         Args:
             query_body: The body of the query to delete documents by.
+            refresh: Refresh the affected shards once the delete completes, so an
+                immediate follow-up count/search sees the deletions (they are
+                otherwise not visible until the next auto-refresh).
+            max_docs: Delete at most this many matching docs, then return. Bounds a
+                single call so it can't run past the client's HTTP timeout on a huge
+                match set; the caller re-runs until the match set is empty.
 
         Raises:
             Exception: There was an error deleting the documents.
@@ -1171,7 +1198,12 @@ class OpenSearchIndexClient(OpenSearchClient):
             "Trying to delete documents by query for index %s.",
             self._index_name,
         )
-        result = self._client.delete_by_query(index=self._index_name, body=query_body)
+        params: dict[str, Any] = {"index": self._index_name, "body": query_body}
+        if refresh:
+            params["refresh"] = True
+        if max_docs is not None:
+            params["max_docs"] = max_docs
+        result = self._client.delete_by_query(**params)
         if result.get("timed_out", False):
             raise RuntimeError(
                 f"Delete by query timed out for index {self._index_name}."
@@ -1196,6 +1228,22 @@ class OpenSearchIndexClient(OpenSearchClient):
             self._index_name,
         )
         return num_deleted
+
+    def count_by_query(self, query_body: dict[str, Any]) -> int:
+        """Counts documents matching a query for this index (the _count API).
+
+        Used as reclaim's deletion gate (count == 0 means the slice drained), so it
+        fails closed: a partial count from shard failures under-reports and could
+        falsely green-light deletion, so raise instead of trusting it.
+        """
+        result = self._client.count(index=self._index_name, body=query_body)
+        shards = result.get("_shards", {})
+        if shards.get("failed", 0):
+            raise RuntimeError(
+                f"Count for index {self._index_name} hit shard failures ({shards}); "
+                "refusing a partial count as a deletion gate."
+            )
+        return int(result["count"])
 
     @log_function_time(
         print_only=True,

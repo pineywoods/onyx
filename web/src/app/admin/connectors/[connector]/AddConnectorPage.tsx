@@ -523,7 +523,7 @@ export default function AddConnector({
                         </Text>
                         <Link
                           href={`/admin/connectors/${connector}?mode=federated`}
-                          className="text-action-link-04 hover:underline text-sm"
+                          className="text-action-selection-04 hover:underline text-sm"
                         >
                           Use federated version instead →
                         </Link>
@@ -562,7 +562,7 @@ export default function AddConnector({
                   <Section
                     flexDirection="row"
                     justifyContent="start"
-                    gap={1}
+                    gap={4}
                     className="mt-6"
                   >
                     {/* Button to pop up a form to manually enter credentials */}

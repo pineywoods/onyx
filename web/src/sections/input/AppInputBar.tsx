@@ -48,10 +48,11 @@ import {
   SvgX,
   SvgSimpleLoader,
 } from "@opal/icons";
-import { Button, SelectButton } from "@opal/components";
+import { Button, SelectButton, Text } from "@opal/components";
 import { Popover } from "@opal/components";
 import { useQueryController } from "@/providers/QueryControllerProvider";
 import { Section } from "@/layouts/general-layouts";
+import { useIncognito } from "@/providers/IncognitoProvider";
 import { Spacer } from "@opal/components";
 import MicrophoneButton from "@/sections/input/MicrophoneButton";
 import Waveform from "@/components/voice/Waveform";
@@ -121,6 +122,7 @@ const AppInputBar = React.memo(
     currentTabUrl,
     onToggleTabReading,
   }: AppInputBarProps) => {
+    const { incognitoEnabled } = useIncognito();
     const [isRecording, setIsRecording] = useState(false);
     const [recordingCycleCount, setRecordingCycleCount] = useState(0);
     const [isMuted, setIsMuted] = useState(false);
@@ -218,7 +220,11 @@ const AppInputBar = React.memo(
     // Snapshot of message, read non-reactively in the restore effect so seeding
     // doesn't re-run on every keystroke.
     const messageRef = useRef(message);
-    messageRef.current = message;
+    const isRecordingRef = useRef(isRecording);
+
+    useEffect(() => {
+      messageRef.current = message;
+    }, [message]);
 
     useEffect(() => {
       draftSeededRef.current = false;
@@ -253,12 +259,12 @@ const AppInputBar = React.memo(
     }, [message, chatDraftLoaded, saveChatDraft]);
 
     const handleRecordingChange = useCallback((nextIsRecording: boolean) => {
-      setIsRecording((prevIsRecording) => {
-        if (!prevIsRecording && nextIsRecording) {
-          setRecordingCycleCount((count) => count + 1);
-        }
-        return nextIsRecording;
-      });
+      const wasRecording = isRecordingRef.current;
+      isRecordingRef.current = nextIsRecording;
+      if (!wasRecording && nextIsRecording) {
+        setRecordingCycleCount((count) => count + 1);
+      }
+      setIsRecording(nextIsRecording);
     }, []);
 
     // Wrapper for onSubmit that stops TTS first to prevent overlapping voices
@@ -1069,6 +1075,26 @@ const AppInputBar = React.memo(
             )}
           </div>
         </Disabled>
+        {/* Stays for the whole session: the warning is most relevant
+            once the user is actually chatting. */}
+        {incognitoEnabled && (
+          <Section
+            flexDirection="column"
+            alignItems="center"
+            height="fit"
+            gap={0.125}
+            className="mt-3 text-center"
+          >
+            <Text font="secondary-body" color="text-02">
+              This chat won&apos;t appear in your history or be used for memory.
+            </Text>
+            <Text font="secondary-body" color="text-02">
+              Your admin may still see this chat based on your
+              organization&apos;s policy. Third party tools can still record
+              your activity.
+            </Text>
+          </Section>
+        )}
       </>
     );
   }

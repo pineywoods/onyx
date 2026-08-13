@@ -1,11 +1,11 @@
 import datetime
 import re
 from enum import Enum
-from typing import Any, List, NotRequired, Optional, TypedDict
+from typing import Any, List, Literal, NotRequired, Optional, TypedDict
 from uuid import UUID
 
 from mcp.types import Tool as MCPLibTool
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AnyUrl, BaseModel, Field, model_validator
 
 from onyx.db.enums import (
     EndpointPolicy,
@@ -52,12 +52,30 @@ def apply_auto_substitutions(value: str, *, user_email: str) -> str:
     return value
 
 
+def contains_mcp_placeholder(value: str) -> bool:
+    return _PLACEHOLDER_RE.search(value) is not None
+
+
 # Headers that must never be sourced from stored MCP credentials or request
 # templates. Host is particularly critical — it can be used for Host Header
 # Injection attacks to route requests to unintended internal servers.
 DENYLISTED_MCP_HEADERS = {
     "host",
 }
+
+
+def merge_mcp_headers(*sources: dict[str, str]) -> dict[str, str]:
+    """Merge HTTP headers case-insensitively; later sources win."""
+    merged: dict[str, str] = {}
+    names_by_lower: dict[str, str] = {}
+    for source in sources:
+        for name, value in source.items():
+            lowered = name.lower()
+            if previous_name := names_by_lower.get(lowered):
+                merged.pop(previous_name, None)
+            merged[name] = value
+            names_by_lower[lowered] = name
+    return merged
 
 
 # This should be updated along with MCPConnectionData
@@ -77,8 +95,8 @@ class MCPConnectionData(TypedDict):
     in Postgres"""
 
     headers: dict[str, str]
-    # The placeholder form of shared API-token headers. The rendered headers
-    # above remain the source used for outbound requests.
+    # Admin-authored source template. User configs store its rendered result in
+    # `headers`; admin-managed configs may render it at request time.
     header_template: NotRequired[dict[str, str]]
     # Stored in the encrypted connection config so an admin can edit the
     # header template without re-entering the masked API token.
@@ -104,7 +122,7 @@ class MCPConnectionData(TypedDict):
 
 
 class MCPAuthTemplate(BaseModel):
-    """Template for per-user authentication configuration"""
+    """Header template shared by every MCP authentication type."""
 
     headers: dict[str, str] = Field(
         default_factory=dict,
@@ -119,6 +137,24 @@ class MCPAuthTemplate(BaseModel):
         description="List of required field names that users must provide",
     )
 
+    @model_validator(mode="after")
+    def validate_headers(self) -> "MCPAuthTemplate":
+        seen: set[str] = set()
+        for name in self.headers:
+            lowered = name.lower()
+            if _HTTP_FIELD_NAME_RE.fullmatch(name) is None:
+                raise ValueError(f"Invalid MCP header name: {name!r}")
+            if lowered in DENYLISTED_MCP_HEADERS:
+                raise ValueError(f"MCP header {name!r} is not allowed")
+            if lowered in seen:
+                raise ValueError(f"Duplicate MCP header name: {name!r}")
+            seen.add(lowered)
+
+        derived_fields = self.derive_required_fields(self.headers)
+        if self.headers or not self.required_fields:
+            self.required_fields = derived_fields
+        return self
+
     @staticmethod
     def derive_required_fields(headers: dict[str, str]) -> list[str]:
         """Extract the set of `{placeholder}` field names referenced by
@@ -131,7 +167,26 @@ class MCPAuthTemplate(BaseModel):
                 if match in AUTO_SUBSTITUTED_PLACEHOLDER_KEYS:
                     continue
                 seen.add(match)
-        return list(seen)
+        return sorted(seen)
+
+    def render(
+        self, substitutions: dict[str, str], *, user_email: str
+    ) -> dict[str, str]:
+        missing = [
+            field for field in self.required_fields if not substitutions.get(field)
+        ]
+        if missing:
+            raise ValueError(
+                f"Missing MCP header substitutions: {', '.join(sorted(missing))}"
+            )
+
+        headers: dict[str, str] = {}
+        for name, template in self.headers.items():
+            value = template
+            for key, replacement in substitutions.items():
+                value = value.replace(f"{{{key}}}", replacement)
+            headers[name] = apply_auto_substitutions(value, user_email=user_email)
+        return headers
 
 
 class MCPToolCreateRequest(BaseModel):
@@ -196,9 +251,13 @@ class MCPToolCreateRequest(BaseModel):
     auth_template: Optional[MCPAuthTemplate] = Field(
         None,
         description=(
-            "Authentication header template for API-token authentication. "
-            "Shared templates support the {api_key} placeholder."
+            "Headers sent to the MCP server. Values may contain placeholders "
+            "supplied per user."
         ),
+    )
+    auth_template_headers_changed: dict[str, bool] = Field(
+        default_factory=dict,
+        description="Per-header flags marking edited template values.",
     )
     admin_credentials: Optional[dict[str, str]] = Field(
         None,
@@ -257,18 +316,6 @@ class MCPToolCreateRequest(BaseModel):
             # server is created. Do not materialize that default here, since
             # doing so makes an omitted template look like an explicit edit.
             if self.auth_template is not None:
-                placeholders: set[str] = {
-                    match
-                    for value in self.auth_template.headers.values()
-                    for match in _PLACEHOLDER_RE.findall(value)
-                }
-                unsupported_placeholders: set[str] = placeholders - {"api_key"}
-                if unsupported_placeholders:
-                    raise ValueError(
-                        "Shared API-token header templates only support the "
-                        f"{{api_key}} placeholder; unsupported placeholders: "
-                        f"{', '.join(sorted(unsupported_placeholders))}"
-                    )
                 if not any(
                     "{api_key}" in value
                     for value in self.auth_template.headers.values()
@@ -276,16 +323,6 @@ class MCPToolCreateRequest(BaseModel):
                     raise ValueError(
                         "Shared API-token header templates must include the {api_key} placeholder"
                     )
-                if any(
-                    _HTTP_FIELD_NAME_RE.fullmatch(name) is None
-                    or name.strip().lower() in DENYLISTED_MCP_HEADERS
-                    for name in self.auth_template.headers
-                ):
-                    raise ValueError(
-                        "Shared API-token header templates contain an invalid header name"
-                    )
-                self.auth_template.required_fields = ["api_key"]
-
         # Validate that API token is not provided for per-user auth
         if (
             self.auth_type == MCPAuthenticationType.API_TOKEN
@@ -306,14 +343,13 @@ class MCPToolCreateRequest(BaseModel):
                 raise ValueError(
                     "auth_template is required when auth_performer is 'per_user'"
                 )
-            if not self.admin_credentials:
+            if self.auth_template.required_fields and not self.admin_credentials:
                 raise ValueError(
                     "admin_credentials is required when auth_performer is 'per_user'"
                 )
 
-        # OAuth client ID/secret are optional. If provided, they will seed the
-        # OAuth client info; otherwise, the MCP client will attempt dynamic
-        # client registration.
+        # OAuth client ID/secret are optional. Without them, auto-discovery
+        # attempts CIMD before falling back to dynamic client registration.
         if self.auth_type != MCPAuthenticationType.OAUTH:
             self.oauth_provider_mode = MCPOAuthProviderMode.AUTO_DISCOVERY
             self.oauth_authorization_endpoint = None
@@ -449,11 +485,15 @@ class MCPUserOAuthConnectRequest(BaseModel):
     server_id: int = Field(..., description="ID of the MCP server")
     return_path: str = Field(..., description="Path to redirect to after callback")
     include_resource_param: bool = Field(..., description="Include resource parameter")
+    force_reauthentication: bool = Field(
+        default=False,
+        description="Ignore stored OAuth tokens and start a fresh authorization flow",
+    )
     oauth_client_id: str | None = Field(
-        None, description="OAuth client ID (optional for DCR)"
+        None, description="OAuth client ID (optional for CIMD or DCR)"
     )
     oauth_client_secret: str | None = Field(
-        None, description="OAuth client secret (optional for DCR)"
+        None, description="OAuth client secret (optional for CIMD or DCR)"
     )
     oauth_client_id_changed: bool = Field(
         default=False,
@@ -498,6 +538,15 @@ class MCPOAuthCallbackResponse(BaseModel):
     server_id: int
     server_name: str
     redirect_url: str
+
+
+class MCPOAuthClientMetadataDocument(BaseModel):
+    client_id: AnyUrl
+    client_name: str
+    redirect_uris: list[AnyUrl]
+    grant_types: list[Literal["authorization_code", "refresh_token"]]
+    response_types: list[Literal["code"]]
+    token_endpoint_auth_method: Literal["none"]
 
 
 class MCPDynamicClientRegistrationRequest(BaseModel):
@@ -593,6 +642,13 @@ class MCPServer(BaseModel):
     admin_credentials: Optional[dict[str, str]] = Field(
         None,
         description="Admin's credential key-value pairs for template substitution and storage",
+    )
+    craft_connected: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether Craft can authenticate this user against the server. "
+            "None outside the Craft listing, the only one that computes it."
+        ),
     )
 
 

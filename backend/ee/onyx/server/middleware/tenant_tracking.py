@@ -19,6 +19,7 @@ from onyx.redis.redis_pool import (
     retrieve_auth_token_data_from_bearer,
     retrieve_auth_token_data_from_redis,
 )
+from onyx.server.middleware.api_prefix import strip_api_prefix
 from shared_configs.configs import MULTI_TENANT, POSTGRES_DEFAULT_SCHEMA
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
@@ -101,8 +102,7 @@ def add_api_server_tenant_id_middleware(
 
 
 def _is_path_allowed(path: str) -> bool:
-    if path.startswith("/api/"):
-        path = path[4:]
+    path = strip_api_prefix(path)
     return any(
         path.startswith(prefix) for prefix in MULTI_TENANT_GATING_ALLOWED_PREFIXES
     )
@@ -186,12 +186,12 @@ async def _get_tenant_id_from_request(
         # and fall back to the wrong tenant. Fall back only on the normal path.
         if sys.exc_info()[0] is None:
             if tenant_id:
-                return tenant_id
+                return tenant_id  # noqa: B012
 
             # As a final step, check for explicit tenant_id cookie
             tenant_id_cookie = request.cookies.get(TENANT_ID_COOKIE_NAME)
             if tenant_id_cookie and is_valid_schema_name(tenant_id_cookie):
-                return tenant_id_cookie
+                return tenant_id_cookie  # noqa: B012
 
             # If we've reached this point, return the default schema
-            return POSTGRES_DEFAULT_SCHEMA
+            return POSTGRES_DEFAULT_SCHEMA  # noqa: B012

@@ -381,9 +381,7 @@ def test_no_refresh_without_persisted_expiry(monkeypatch: pytest.MonkeyPatch) ->
 def test_refresh_persists_via_real_onyx_token_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persists via the real `OnyxTokenStorage.set_tokens`, so `headers` is
-    replaced with just the new `Authorization` value (not merged) — other
-    static headers are dropped, same as a non-SSE refresh."""
+    """OAuth refresh replaces Authorization without dropping custom headers."""
     config_data: dict[str, Any] = {
         "headers": {"Authorization": "Bearer OLD", "X-Custom": "static-value"},
         MCPOAuthKeys.TOKENS.value: {
@@ -408,7 +406,10 @@ def test_refresh_persists_via_real_onyx_token_storage(
     header = refresh_mcp_oauth_token_if_expired(_server_stub(), 42, "user-1")
 
     assert header == "Bearer NEW"
-    assert config_data["headers"] == {"Authorization": "Bearer NEW"}
+    assert config_data["headers"] == {
+        "Authorization": "Bearer NEW",
+        "X-Custom": "static-value",
+    }
 
 
 def test_refresh_failure_is_non_fatal_to_caller(
@@ -486,14 +487,15 @@ def test_form_encoded_refresh_error_is_logged_without_secrets(
         for record in caplog.records
         if record.getMessage() == "mcp_oauth.refresh.started"
     )
-    assert getattr(failed_record, "oauth_error") == "bad_refresh_token"
+    assert getattr(failed_record, "oauth_error") == "bad_refresh_token"  # noqa: B009
     assert (
-        getattr(failed_record, "response_content_type")
+        getattr(failed_record, "response_content_type")  # noqa: B009
         == "application/x-www-form-urlencoded"
     )
-    assert getattr(failed_record, "response_body_format") == "form"
-    assert getattr(failed_record, "refresh_attempt_id") == getattr(
-        started_record, "refresh_attempt_id"
+    assert getattr(failed_record, "response_body_format") == "form"  # noqa: B009
+    assert getattr(failed_record, "refresh_attempt_id") == getattr(  # noqa: B009
+        started_record,
+        "refresh_attempt_id",  # noqa: B009
     )
     assert "OLD_ACCESS_TOKEN" not in caplog.text
     assert "ROTATING_REFRESH_TOKEN" not in caplog.text

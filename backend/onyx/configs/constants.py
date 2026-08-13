@@ -1,3 +1,4 @@
+import logging
 import os
 import platform
 import re
@@ -114,6 +115,7 @@ SLACK_SERVICE_ACCOUNT_EMAIL = (
 ).lower()
 
 # Key-Value store keys
+KV_PASSWORD_AUTH_ENABLED_KEY = "password_auth_enabled_override"
 KV_REINDEX_KEY = "needs_reindexing"
 KV_UNSTRUCTURED_API_KEY = "unstructured_api_key"
 KV_USER_STORE_KEY = "INVITED_USERS"
@@ -131,6 +133,10 @@ KV_KG_CONFIG_KEY = "kg_config"
 
 # NOTE: we use this timeout / 4 in various places to refresh a lock
 # might be worth separating this timeout into separate timeouts for each situation
+# One pass of the incognito cleanup sweep. Leftovers wait for the next pass
+# rather than holding the beat lock past its timeout.
+INCOGNITO_FILE_CLEANUP_BATCH = 200
+
 CELERY_GENERIC_BEAT_LOCK_TIMEOUT = 120
 
 CELERY_VESPA_SYNC_BEAT_LOCK_TIMEOUT = 120
@@ -167,7 +173,37 @@ CELERY_PRUNING_LOCK_TIMEOUT = 3600  # 1 hour (in seconds)
 
 CELERY_PERMISSIONS_SYNC_LOCK_TIMEOUT = 3600  # 1 hour (in seconds)
 
-CELERY_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT = 300  # 5 min
+# While this lock is held, duplicate dispatches for the same cc_pair exit
+# immediately. Deployments whose group syncs legitimately run for hours should
+# raise this toward the JOB_TIMEOUT crawl deadline (6h) so re-dispatches can't
+# stack concurrent crawls on one heavy worker; a worker that dies mid-sync
+# leaves the lock stuck for at most this TTL.
+# Non-positive values would break the guard (0 = a lock with no TTL that a
+# crashed worker leaves stuck forever; negatives fail acquisition), so clamp
+# bad overrides back to the default — loudly, since an operator who set a
+# long TTL needs to know their duplicate-crawl protection is NOT in effect.
+_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT_DEFAULT = 300
+_external_group_sync_lock_timeout_raw = os.environ.get(
+    "CELERY_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT"
+)
+try:
+    _external_group_sync_lock_timeout = (
+        int(_external_group_sync_lock_timeout_raw)
+        if _external_group_sync_lock_timeout_raw
+        else _EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT_DEFAULT
+    )
+except ValueError:
+    _external_group_sync_lock_timeout = -1
+if _external_group_sync_lock_timeout > 0:
+    CELERY_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT: int = _external_group_sync_lock_timeout
+else:
+    logging.getLogger(__name__).warning(
+        "Ignoring invalid CELERY_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT=%r "
+        "(must be a positive integer of seconds); using the %ds default.",
+        _external_group_sync_lock_timeout_raw,
+        _EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT_DEFAULT,
+    )
+    CELERY_EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT = _EXTERNAL_GROUP_SYNC_LOCK_TIMEOUT_DEFAULT
 
 CELERY_USER_FILE_PROCESSING_LOCK_TIMEOUT = 30 * 60  # 30 minutes (in seconds)
 
@@ -396,6 +432,7 @@ class FileOrigin(str, Enum):
     GENERATED_REPORT = "generated_report"
     INDEXING_CHECKPOINT = "indexing_checkpoint"
     INDEXING_STAGING = "indexing_staging"
+    LOG_EXPORT = "log_export"
     PLAINTEXT_CACHE = "plaintext_cache"
     OTHER = "other"
     QUERY_HISTORY_CSV = "query_history_csv"
@@ -483,6 +520,8 @@ class OnyxRedisLocks:
     CHECK_PORT_BEAT_LOCK = "da_lock:check_port_beat"
     CHECK_CHECKPOINT_CLEANUP_BEAT_LOCK = "da_lock:check_checkpoint_cleanup_beat"
     CHECK_INDEX_ATTEMPT_CLEANUP_BEAT_LOCK = "da_lock:check_index_attempt_cleanup_beat"
+    CHECK_OLD_INDEX_RECLAIM_BEAT_LOCK = "da_lock:check_old_index_reclaim_beat"
+    OLD_INDEX_RECLAIM_LOCK_PREFIX = "da_lock:old_index_reclaim"
     CHECK_CONNECTOR_DOC_PERMISSIONS_SYNC_BEAT_LOCK = (
         "da_lock:check_connector_doc_permissions_sync_beat"
     )
@@ -525,6 +564,7 @@ class OnyxRedisLocks:
     USER_FILE_PROJECT_SYNC_LOCK_PREFIX = "da_lock:user_file_project_sync"
     USER_FILE_PROJECT_SYNC_QUEUED_PREFIX = "da_lock:user_file_project_sync_queued"
     USER_FILE_DELETE_BEAT_LOCK = "da_lock:check_user_file_delete_beat"
+    INCOGNITO_FILE_CLEANUP_BEAT_LOCK = "da_lock:check_incognito_file_cleanup_beat"
     USER_FILE_DELETE_LOCK_PREFIX = "da_lock:user_file_delete"
     # Short-lived key set when a delete task is enqueued; cleared when the worker picks it up.
     # Prevents the beat from re-enqueuing the same file while a delete task is already queued.
@@ -608,6 +648,7 @@ class OnyxCeleryTask:
     PROCESS_SINGLE_USER_FILE_PROJECT_SYNC = "process_single_user_file_project_sync"
     CHECK_FOR_USER_FILE_DELETE = "check_for_user_file_delete"
     DELETE_SINGLE_USER_FILE = "delete_single_user_file"
+    CHECK_FOR_INCOGNITO_FILE_CLEANUP = "check_for_incognito_file_cleanup"
 
     # Targeted reindex
     TARGETED_REINDEX_TASK = "targeted_reindex_task"
@@ -624,6 +665,9 @@ class OnyxCeleryTask:
     # Connector index attempt cleanup
     CHECK_FOR_INDEX_ATTEMPT_CLEANUP = "check_for_index_attempt_cleanup"
     CLEANUP_INDEX_ATTEMPT = "cleanup_index_attempt"
+
+    # Old-index reclamation (post-reindex deletion of the now-PAST index)
+    CHECK_FOR_OLD_INDEX_RECLAIM = "check_for_old_index_reclaim"
 
     MONITOR_BACKGROUND_PROCESSES = "monitor_background_processes"
     MONITOR_CELERY_QUEUES = "monitor_celery_queues"
@@ -662,11 +706,16 @@ class OnyxCeleryTask:
     EXPORT_QUERY_HISTORY_TASK = "export_query_history_task"
     EXPORT_QUERY_HISTORY_CLEANUP_TASK = "export_query_history_cleanup_task"
 
+    # Admin log export
+    EXPORT_LOGS_COLLECT_TASK = "export_logs_collect_task"
+    EXPORT_LOGS_CLEANUP_TASK = "export_logs_cleanup_task"
+
     # Hook execution log retention
     HOOK_EXECUTION_LOG_CLEANUP_TASK = "hook_execution_log_cleanup_task"
 
-    # License expiry tiered warnings
+    # License expiry monitoring and renewal
     CHECK_LICENSE_EXPIRY_NOTIFICATIONS = "check_license_expiry_notifications"
+    RECLAIM_LICENSE = "reclaim_license"
 
     # Sandbox cleanup
     CLEANUP_IDLE_SANDBOXES = "cleanup_idle_sandboxes"
@@ -700,9 +749,9 @@ REDIS_SOCKET_KEEPALIVE_OPTIONS[socket.TCP_KEEPCNT] = 3
 # platform where the attribute actually resolves, since ty analyzes one
 # platform at a time and can't model cross-platform conditional unused-ignores.
 if platform.system() == "Darwin":
-    REDIS_SOCKET_KEEPALIVE_OPTIONS[getattr(socket, "TCP_KEEPALIVE")] = 60
+    REDIS_SOCKET_KEEPALIVE_OPTIONS[getattr(socket, "TCP_KEEPALIVE")] = 60  # noqa: B009
 else:
-    REDIS_SOCKET_KEEPALIVE_OPTIONS[getattr(socket, "TCP_KEEPIDLE")] = 60
+    REDIS_SOCKET_KEEPALIVE_OPTIONS[getattr(socket, "TCP_KEEPIDLE")] = 60  # noqa: B009
 
 
 class OnyxCallTypes(str, Enum):

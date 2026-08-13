@@ -30,12 +30,15 @@ from sqlalchemy import (
     desc,
     event,
     func,
+    inspect,
     text,
     true,
+    update,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB as PGJSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -80,9 +83,11 @@ from onyx.db.enums import (
     HierarchyNodeType,
     HookFailStrategy,
     HookPoint,
+    IncognitoRecordMode,
     IndexingMode,
     IndexingStatus,
     IndexModelStatus,
+    IndexReclaimStatus,
     LLMModelFlowType,
     MCPAuthenticationPerformer,
     MCPAuthenticationType,
@@ -119,7 +124,7 @@ from onyx.file_store.models import FileDescriptor
 from onyx.kg.models import KGEntityTypeAttributes, KGStage
 from onyx.llm.models import ReasoningEffort
 from onyx.llm.override_models import LLMOverride, PromptOverride
-from onyx.server.security.models import SSRFProtectionLevel
+from onyx.server.security.models import IncognitoAvailability, SSRFProtectionLevel
 from onyx.tools.tool_implementations.web_search.models import WebContentProviderConfig
 from onyx.utils.encryption import decrypt_bytes_to_string, encrypt_string_to_bytes
 from onyx.utils.headers import HeaderItemDict
@@ -336,6 +341,13 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     # Craft gate (PostHog flag / ENABLE_CRAFT).
     craft_enabled: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
+    )
+
+    # Addresses this user was renamed away from. They still match indexed ACLs
+    # that name them, so each one grants access until another identity claims
+    # the address.
+    prior_emails: Mapped[list[str]] = mapped_column(
+        postgresql.ARRAY(String), nullable=False, default=list, server_default="{}"
     )
 
     """
@@ -2153,6 +2165,28 @@ class SearchSettings(Base):
         ForeignKey("search_settings.id", ondelete="SET NULL"), nullable=True
     )
 
+    # Old-index reclamation (see reclaim helpers in db/search_settings.py).
+    # NULL = not reclaim-tracked; set to PENDING at reindex submit on the current
+    # PRESENT (the future PAST).
+    reclaim_status: Mapped[IndexReclaimStatus | None] = mapped_column(
+        Enum(IndexReclaimStatus, native_enum=False), nullable=True
+    )
+    # Soak anchor: when the index stopped being read (port drained), NOT swap time —
+    # so INSTANT backfills (which read PAST post-swap) anchor correctly.
+    reclaim_stopped_reading_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Consecutive failures on the current step; drives BLOCKED.
+    reclaim_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    reclaim_last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Consented not-ported cc_pairs to delete once the port completes. Re-validated
+    # at fire time (only those still INVALID/PAUSED are deleted).
+    pending_cc_pair_deletions: Mapped[list[int] | None] = mapped_column(
+        postgresql.ARRAY(Integer), nullable=True
+    )
+
     # allows for quantization -> less memory usage for a small performance hit.
     # Defaults to FLOAT (float32). OpenSearch ignores this field and stores
     # vectors as float32 regardless; BFLOAT16 is only honored by Vespa.
@@ -2202,6 +2236,12 @@ class SearchSettings(Base):
             "status",
             unique=True,
             postgresql_where=(status == IndexModelStatus.FUTURE),
+        ),
+        # Scan predicate for the reclaim beat task: PAST rows still needing cleanup.
+        Index(
+            "ix_search_settings_reclaimable",
+            "reclaim_status",
+            postgresql_where=(status == IndexModelStatus.PAST),
         ),
     )
 
@@ -3028,6 +3068,18 @@ class ChatSession(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # This chat created by OnyxBot
     onyxbot_flow: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Pinned at creation, so a later setting change cannot alter a live
+    # session. NULL is an ordinary chat and records normally. Of the incognito
+    # modes only FULL_HISTORY writes conversation content into messages.
+    incognito_record_mode: Mapped[IncognitoRecordMode | None] = mapped_column(
+        Enum(
+            IncognitoRecordMode,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=True,
+        default=None,
+    )
     # Only ever set to True if system is set to not hard-delete chats
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     # controls whether or not this conversation is viewable by others
@@ -4485,6 +4537,46 @@ class KVStore(Base):
     )
 
 
+def _release_prior_email_claim(
+    email: str, connection: Connection, *, user_id: UUID | None = None
+) -> None:
+    """Revoke the alias grant when a different identity takes the address.
+
+    A prior address keeps granting its former holder access, so it has to stop
+    the moment it legitimately belongs to someone else.
+    """
+    normalized_email = email.lower()
+    release = (
+        update(User)
+        .where(User.prior_emails.contains([normalized_email]))
+        .values(prior_emails=func.array_remove(User.prior_emails, normalized_email))
+    )
+    if user_id is not None:
+        release = release.where(User.id != user_id)  # ty: ignore[invalid-argument-type]
+
+    connection.execute(release)
+
+
+# Claiming an address anywhere revokes it as anyone else's alias.
+@event.listens_for(User, "before_insert")
+def _release_inserted_user_email(
+    mapper: Mapper,  # noqa: ARG001
+    connection: Connection,
+    target: User,
+) -> None:
+    _release_prior_email_claim(target.email, connection)
+
+
+@event.listens_for(User, "before_update")
+def _release_updated_user_email(
+    mapper: Mapper,  # noqa: ARG001
+    connection: Connection,
+    target: User,
+) -> None:
+    if inspect(target).attrs.email.history.has_changes():
+        _release_prior_email_claim(target.email, connection, user_id=target.id)
+
+
 class EncryptedKeyValueStore(Base):
     """Encrypted-at-rest key/value storage for instance-level secrets. Postgres
     only, never cached, so secrets stay out of Redis."""
@@ -4515,6 +4607,27 @@ class SecuritySettings(Base):
     )
     track_external_idp_expiry: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
+    )
+    # Stored as the IncognitoAvailability value (e.g. "groups"). None falls
+    # back to the off-by-default env behavior.
+    incognito_availability: Mapped[IncognitoAvailability | None] = mapped_column(
+        Enum(
+            IncognitoAvailability,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=True,
+        default=None,
+    )
+    # What new incognito sessions pin. None falls back to usage_only.
+    incognito_record_mode: Mapped[IncognitoRecordMode | None] = mapped_column(
+        Enum(
+            IncognitoRecordMode,
+            native_enum=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
+        nullable=True,
+        default=None,
     )
     # Stored as the SSRFProtectionLevel value (e.g. "validate_all"); None falls
     # back to the level derived from the legacy SSRF env vars.
@@ -4554,7 +4667,6 @@ class SecuritySettings(Base):
     password_require_special_char: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
     )
-
     __table_args__ = (
         CheckConstraint("id = true", name="ck_security_settings_singleton"),
         # Only catches min > max when both are explicitly overridden; the
@@ -4582,6 +4694,12 @@ class FileRecord(Base):
     # External storage support (S3, MinIO, Azure Blob, etc.)
     bucket_name: Mapped[str] = mapped_column(String)
     object_key: Mapped[str] = mapped_column(String)
+
+    # Size of the stored content in bytes. NULL for rows written before this
+    # column existed (size unknown without a per-object storage lookup);
+    # -1 when the backing object was confirmed missing at lookup time
+    # (terminal - listings stop re-probing the object store).
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # Timestamps for external storage
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -4918,6 +5036,12 @@ class UserGroup(Base):
     )
     # whether this is a default group (e.g. "Basic", "Admins") that cannot be deleted
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Members may start incognito chats when the workspace availability mode
+    # is groups-only. Ignored under the other modes.
+    incognito_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     # Last time a user updated this user group
     time_last_modified_by_user: Mapped[datetime.datetime] = mapped_column(
@@ -5271,7 +5395,6 @@ class UserDocument(str, Enum):
 
 class UserFile(Base):
     __tablename__ = "user_file"
-
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     user_id: Mapped[UUID | None] = mapped_column(ForeignKey("user.id"), nullable=False)
     assistants: Mapped[list["Persona"]] = relationship(
@@ -5293,6 +5416,17 @@ class UserFile(Base):
         Enum(UserFileStatus, native_enum=False, name="userfilestatus"),
         nullable=False,
         default=UserFileStatus.PROCESSING,
+    )
+    # Privacy is decided when the file is uploaded, from the toggle state, so
+    # an attachment made before the session exists is already private.
+    incognito: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Which session cleans it up. NULL until the session is created on the
+    # first message and adopts it. No foreign key: the session row is deleted
+    # first and these must outlive it to be swept.
+    incognito_session_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, default=None
     )
     needs_project_sync: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
@@ -5325,6 +5459,15 @@ class UserFile(Base):
     )
 
     __table_args__ = (
+        # Declared here as well as in the migration so autogenerate does not
+        # read it as a stray index and propose dropping it.
+        Index(
+            "ix_user_file_incognito_sweep",
+            "incognito_session_id",
+            "status",
+            "last_accessed_at",
+            postgresql_where=text("incognito"),
+        ),
         Index(
             "ix_user_file_secondary_reconcile_pending",
             "id",
@@ -5346,11 +5489,26 @@ Multi-tenancy related tables
 
 
 class PublicBase(DeclarativeBase):
+    """Base for globally-shared tables living in the `public` schema.
+
+    These are *not* per-tenant: there is exactly one copy of each, in the catalog
+    database. They are deliberately kept off `Base` so that:
+
+      - the per-tenant Alembic tree (whose target_metadata is `Base.metadata`) never
+        considers creating them inside a tenant schema, and
+      - the `alembic_tenants` tree (target_metadata `PublicBase.metadata`) can actually
+        autogenerate against them.
+
+    Access these only through `get_catalog_session()`. A tenant-scoped session lands on
+    whichever database that tenant lives on — the same one today, but the wrong one
+    once the tenant has been moved to another shard.
+    """
+
     __abstract__ = True
 
 
 # Strictly keeps track of the tenant that a given user will authenticate to.
-class UserTenantMapping(Base):
+class UserTenantMapping(PublicBase):
     __tablename__ = "user_tenant_mapping"
     __table_args__ = ({"schema": "public"},)
 
@@ -5363,8 +5521,42 @@ class UserTenantMapping(Base):
         return value.lower() if value else value
 
 
-class AvailableTenant(Base):
+class UserTenantMappingOAuthAccount(PublicBase):
+    """Copy of an `OAuthAccount` subject, which survives an email change at the
+    provider, keyed to the mapping row it authenticates. The primary key holds
+    one mapping per subject. ON UPDATE CASCADE follows an email rekey, and ON
+    DELETE CASCADE drops the link with its membership. Widths mirror the source
+    columns."""
+
+    __tablename__ = "user_tenant_mapping_oauth_account"
+
+    oauth_name: Mapped[str] = mapped_column(
+        String(length=100), nullable=False, primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(length=320), nullable=False, primary_key=True
+    )
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["email", "tenant_id"],
+            [
+                "public.user_tenant_mapping.email",
+                "public.user_tenant_mapping.tenant_id",
+            ],
+            ondelete="CASCADE",
+            onupdate="CASCADE",
+        ),
+        Index("ix_user_tenant_mapping_oauth_account_mapping", "email", "tenant_id"),
+        {"schema": "public"},
+    )
+
+
+class AvailableTenant(PublicBase):
     __tablename__ = "available_tenant"
+    __table_args__ = ({"schema": "public"},)
     """
     These entries will only exist ephemerally and are meant to be picked up by new users on registration.
     """
@@ -5372,11 +5564,16 @@ class AvailableTenant(Base):
     tenant_id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     alembic_version: Mapped[str] = mapped_column(String, nullable=False)
     date_created: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    # Which physical database this pre-provisioned schema was actually created on.
+    # A pooled tenant is bound to the shard it was built on and cannot be handed out
+    # as living anywhere else.
+    shard_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 # This is a mapping from tenant IDs to anonymous user paths
-class TenantAnonymousUserPath(Base):
+class TenantAnonymousUserPath(PublicBase):
     __tablename__ = "tenant_anonymous_user_path"
+    __table_args__ = ({"schema": "public"},)
 
     tenant_id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     anonymous_user_path: Mapped[str] = mapped_column(
@@ -5387,7 +5584,7 @@ class TenantAnonymousUserPath(Base):
 # Lifetime invite counter per tenant. Incremented atomically on every
 # invite reservation; never decremented — removals do not free quota, so
 # loops of invite → remove → invite cannot bypass the trial cap.
-class TenantInviteCounter(Base):
+class TenantInviteCounter(PublicBase):
     __tablename__ = "tenant_invite_counter"
     __table_args__ = {"schema": "public"}
 
@@ -5395,6 +5592,23 @@ class TenantInviteCounter(Base):
     total_invites_sent: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# Maps a tenant to the physical database ("shard") holding its schema.
+# A tenant with no row here lives on the default shard, so this table stays empty
+# until tenants are actually migrated — no backfill is required.
+class TenantShard(PublicBase):
+    __tablename__ = "tenant_shard"
+    __table_args__ = ({"schema": "public"},)
+
+    tenant_id: Mapped[str] = mapped_column(String, primary_key=True)
+    shard_name: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -5784,7 +5998,8 @@ class UserUsage(Base):
     """
     Daily per-user LLM usage rollup for cost/token attribution and budget checks.
 
-    One accumulating row per (user, window, model, flow, provider), not per call.
+    One accumulating row per (user, window, model, flow, provider, incognito),
+    not per call.
     """
 
     __tablename__ = "user_usage"
@@ -5792,8 +6007,8 @@ class UserUsage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
 
     # No index=True: uq_user_usage_dims (user_id-first) covers user-only lookups.
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("user.id", ondelete="CASCADE"), nullable=False
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
     )
 
     window_start: Mapped[datetime.datetime] = mapped_column(
@@ -5805,6 +6020,11 @@ class UserUsage(Base):
     # '' not NULL: unique index dedups pre-PG15 without NULLS NOT DISTINCT.
     provider: Mapped[str] = mapped_column(
         String, nullable=False, default="", server_default=""
+    )
+    # Incognito-turn spend accumulates in its own rows so reporting can label
+    # it. Budget readers sum across both values.
+    incognito: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
 
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -5837,6 +6057,7 @@ class UserUsage(Base):
             "model",
             "flow",
             "provider",
+            "incognito",
             unique=True,
         ),
     )
@@ -5968,6 +6189,16 @@ class BuildSession(Base):
             desc("created_at"),
         ),
         Index("ix_build_session_status", "status"),
+        # Durable port reservation: allocation retries on collision instead of
+        # trusting the application-level scan. Scoped per user — ports only
+        # collide within one user's sandbox.
+        Index(
+            "uq_build_session_nextjs_port",
+            "user_id",
+            "nextjs_port",
+            unique=True,
+            postgresql_where=text("nextjs_port IS NOT NULL"),
+        ),
     )
 
 
@@ -6002,6 +6233,24 @@ class Sandbox(Base):
 
     encrypted_pat: Mapped[SensitiveValue[str] | None] = mapped_column(
         EncryptedString(), nullable=True
+    )
+
+    # Attempt number: incremented (under the per-user reservation lock) each
+    # time a new provisioning attempt is authorized. Every status write names
+    # the attempt it belongs to and only applies while the row still holds
+    # that number, so an old attempt can never overwrite a newer attempt's
+    # outcome. Backend runtime deletes are name-keyed and best-effort
+    # serialized by the provisioning lock; a wrongly deleted pod self-heals
+    # through unhealthy-RUNNING recovery.
+    provisioning_attempt_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # When the current attempt was authorized; a committed PROVISIONING row
+    # whose attempt is older than the managers' bounded waits is dead and may
+    # be taken over. Failure diagnostics live in logs (keyed by sandbox ID +
+    # attempt number), not here.
+    provisioning_started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     # Relationships
@@ -6234,24 +6483,31 @@ class ScheduledTask(Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
-    pre_approved_apps: Mapped[list["ScheduledTaskPreApprovedApp"]] = relationship(
-        "ScheduledTaskPreApprovedApp",
+    pre_approved_targets: Mapped[list["ScheduledTaskPreApprovedTarget"]] = relationship(
+        "ScheduledTaskPreApprovedTarget",
         back_populates="task",
         cascade="all, delete-orphan",
-        order_by="ScheduledTaskPreApprovedApp.id",
+        order_by="ScheduledTaskPreApprovedTarget.id",
     )
 
     @property
     def pre_approved_external_app_ids(self) -> list[int]:
-        """Granted external-app ids in grant order. MCP-server grants are
-        excluded — their target ids live in a different id space, and this
-        property backs the API's external-app-id field (the gate reads all
-        grants regardless of kind via ``get_running_scheduled_run_grants``).
-        Set via ``onyx.db.scheduled_task.set_pre_approved_apps``."""
+        """Granted external-app ids. MCP-server grants are excluded because
+        their target ids live in a different id space."""
         return [
             grant.gated_app.external_app_id
-            for grant in self.pre_approved_apps
+            for grant in self.pre_approved_targets
             if grant.gated_app.external_app_id is not None
+        ]
+
+    @property
+    def pre_approved_mcp_server_ids(self) -> list[int]:
+        """Granted MCP-server ids. External-app grants are excluded because
+        their target ids live in a different id space."""
+        return [
+            grant.gated_app.mcp_server_id
+            for grant in self.pre_approved_targets
+            if grant.gated_app.mcp_server_id is not None
         ]
 
     __table_args__ = (
@@ -6344,7 +6600,7 @@ class ScheduledTaskRun(Base):
     )
 
 
-class ScheduledTaskPreApprovedApp(Base):
+class ScheduledTaskPreApprovedTarget(Base):
     """One (task, target) pre-approval grant: the matched target's ASK-gated
     actions skip the approval park for the task's RUNNING runs.
 
@@ -6354,6 +6610,7 @@ class ScheduledTaskPreApprovedApp(Base):
     index serves the per-task lookup.
     """
 
+    # The table name predates MCP support. Keep it to avoid a schema-only rename.
     __tablename__ = "scheduled_task_pre_approved_app"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -6372,11 +6629,10 @@ class ScheduledTaskPreApprovedApp(Base):
     )
 
     task: Mapped[ScheduledTask] = relationship(
-        "ScheduledTask", back_populates="pre_approved_apps"
+        "ScheduledTask", back_populates="pre_approved_targets"
     )
-    # selectin: pre_approved_external_app_ids and set_pre_approved_apps read
-    # gated_app for every grant, so batch them in one SELECT rather than one
-    # per grant.
+    # selectin: the pre-approved target-id properties read gated_app for every
+    # grant, so batch them in one SELECT rather than one per grant.
     gated_app: Mapped["GatedApp"] = relationship("GatedApp", lazy="selectin")
 
     __table_args__ = (

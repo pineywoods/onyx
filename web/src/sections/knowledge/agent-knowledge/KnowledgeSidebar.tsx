@@ -48,7 +48,7 @@ export function KnowledgeSidebar({
         aria-label="knowledge-sidebar-files"
         rightChildren={
           selectedFileIds.length > 0 ? (
-            <Text mainUiAction className="text-action-link-05">
+            <Text mainUiAction className="text-action-selection-05">
               {selectedFileIds.length}
             </Text>
           ) : undefined
@@ -70,7 +70,7 @@ export function KnowledgeSidebar({
             aria-label="knowledge-sidebar-document-sets"
             rightChildren={
               selectedDocumentSetIds.length > 0 ? (
-                <Text mainUiAction className="text-action-link-05">
+                <Text mainUiAction className="text-action-selection-05">
                   {selectedDocumentSetIds.length}
                 </Text>
               ) : undefined
@@ -79,7 +79,7 @@ export function KnowledgeSidebar({
             Document Set
           </LineItem>
 
-          <Divider paddingParallel="fit" paddingPerpendicular="fit" />
+          <Divider paddingParallel={0} paddingPerpendicular={0} />
 
           {connectedSources.map((connectedSource) => {
             const sourceMetadata = getSourceMetadata(connectedSource.source);
@@ -101,7 +101,7 @@ export function KnowledgeSidebar({
                 aria-label={`knowledge-sidebar-source-${connectedSource.source}`}
                 rightChildren={
                   selectionCount > 0 ? (
-                    <Text mainUiAction className="text-action-link-05">
+                    <Text mainUiAction className="text-action-selection-05">
                       {selectionCount}
                     </Text>
                   ) : undefined
