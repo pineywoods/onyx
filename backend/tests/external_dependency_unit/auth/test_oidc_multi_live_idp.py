@@ -27,7 +27,6 @@ from fastapi_users.password import PasswordHelper
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.orm import Session
 
-from onyx.auth.schemas import UserRole
 from onyx.auth.users import cookie_transport
 from onyx.db.enums import AccountType, SSOProviderType
 from onyx.db.models import ScimUserMapping, SSOProvider, User, User__UserGroup
@@ -79,6 +78,17 @@ def require_mock_oidc() -> None:
     # never makes a network call.
     if not _mock_reachable():
         pytest.skip("requires navikt/mock-oauth2-server (MOCK_OIDC_URL)")
+
+
+@pytest.fixture(autouse=True)
+def _stub_idp_url_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The mock IdP is http on loopback, which the authorize-path guard rejects
+    # (https and public only). Stub it here. The guard is covered in
+    # test_sso_url_guard.py.
+    monkeypatch.setattr(oidc_multi, "validate_idp_url", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        oidc_multi, "validate_discovered_endpoints", lambda *_a, **_k: None
+    )
 
 
 def _config_url(issuer: str) -> str:
@@ -152,7 +162,6 @@ def _provision(
         **{
             "email": _SCIM_USER,
             "hashed_password": pw_helper.hash(pw_helper.generate()),
-            "role": UserRole.BASIC,
             "account_type": AccountType.STANDARD,
             "is_active": True,
             "is_verified": True,

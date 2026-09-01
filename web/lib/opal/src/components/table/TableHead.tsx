@@ -59,9 +59,9 @@ function defaultSortIcon(sorted: SortDirection): IconFunctionComponent {
 }
 
 const alignmentThClass = {
-  left: "text-left",
+  left: "text-start",
   center: "text-center",
-  right: "text-right",
+  right: "text-end",
 } as const;
 
 export default function TableHead({
@@ -123,10 +123,11 @@ export default function TableHead({
       </div>
       {resizable && (
         <div
+          role="presentation"
           onMouseDown={onResizeStart}
           onTouchStart={onResizeStart}
           className={cn(
-            "absolute right-0 top-0 flex h-full items-center",
+            "absolute end-0 top-0 flex h-full items-center",
             "text-border-02",
             "opacity-0 group-hover:opacity-100 no-hover:opacity-100",
             "cursor-col-resize",

@@ -1,8 +1,5 @@
-import {
-  Filters,
-  DocumentInfoPacket,
-  StreamStopInfo,
-} from "@/lib/search/interfaces";
+import { DocumentInfoPacket, StreamStopInfo } from "@/lib/search/interfaces";
+import type { SearchFiltersRequest } from "@/lib/searchFilters/types";
 import { handleSSEStream } from "@/lib/search/streamingUtils";
 import { ReasoningEffortOverride } from "@/lib/languageModels/types";
 import { FeedbackType } from "@/app/app/interfaces";
@@ -22,11 +19,8 @@ import {
   ToolCallMetadata,
   UserKnowledgeFilePacket,
 } from "../interfaces";
-import { MinimalAgent } from "@/lib/agents/types";
 import { ReadonlyURLSearchParams } from "next/navigation";
 import { SEARCH_PARAM_NAMES } from "./searchParams";
-import { WEB_SEARCH_TOOL_ID } from "@/app/app/components/tools/constants";
-import { SEARCH_TOOL_ID } from "@/app/app/components/tools/constants";
 import { Packet } from "./streamingModels";
 
 export async function updateLlmOverrideForChatSession(
@@ -164,7 +158,7 @@ export interface SendMessageParams {
   fileDescriptors?: FileDescriptor[];
   parentMessageId: number | null;
   chatSessionId: string;
-  filters: Filters | null;
+  filters: SearchFiltersRequest | null;
   signal?: AbortSignal;
   deepResearch?: boolean;
   enabledToolIds?: number[];
@@ -525,21 +519,13 @@ export function processRawChatHistory(
   return messages;
 }
 
-export function personaIncludesRetrieval(selectedPersona: MinimalAgent) {
-  return selectedPersona.tools.some(
-    (tool) =>
-      tool.in_code_tool_id &&
-      [SEARCH_TOOL_ID, WEB_SEARCH_TOOL_ID].includes(tool.in_code_tool_id)
-  );
-}
-
 const PARAMS_TO_SKIP = [
   SEARCH_PARAM_NAMES.SUBMIT_ON_LOAD,
   SEARCH_PARAM_NAMES.USER_PROMPT,
   SEARCH_PARAM_NAMES.TITLE,
   // only use these if explicitly passed in
   SEARCH_PARAM_NAMES.CHAT_ID,
-  SEARCH_PARAM_NAMES.PERSONA_ID,
+  SEARCH_PARAM_NAMES.AGENT_ID,
   SEARCH_PARAM_NAMES.PROJECT_ID,
   // do not persist project context in the URL after navigation
   "projectid",
@@ -561,7 +547,7 @@ export function buildChatUrl(
     );
   }
   if (personaId !== null) {
-    finalSearchParams.push(`${SEARCH_PARAM_NAMES.PERSONA_ID}=${personaId}`);
+    finalSearchParams.push(`${SEARCH_PARAM_NAMES.AGENT_ID}=${personaId}`);
   }
 
   existingSearchParams?.forEach((value, key) => {
@@ -577,10 +563,10 @@ export function buildChatUrl(
   const finalSearchParamsString = finalSearchParams.join("&");
 
   if (finalSearchParamsString) {
-    return `/${search ? "search" : "chat"}?${finalSearchParamsString}`;
+    return `/${search ? "search" : "app"}?${finalSearchParamsString}`;
   }
 
-  return `/${search ? "search" : "chat"}`;
+  return `/${search ? "search" : "app"}`;
 }
 
 export async function uploadFilesForChat(

@@ -64,6 +64,25 @@ postgresTls:
   # Full path exposed to POSTGRES_SSLROOTCERT.
   caMountPath: /etc/postgres-ca/ca.crt
 
+# -- Verified TLS connections to Redis.
+# When enabled, the chart mounts one Redis server CA certificate into each
+# backend workload that uses Redis and configures REDIS_SSL with certificate
+# verification. Use an external Redis service (`redis.enabled: false`), because
+# the bundled Redis does not support TLS. The certificate source must already
+# exist in the release namespace.
+redisTls:
+  enabled: false
+  # Verify that the Redis certificate matches REDIS_HOST. Disable only when
+  # the endpoint cannot present a certificate for its configured host or IP.
+  checkHostname: true
+  # Exactly one of caSecretName / caConfigMapName must be set when enabled.
+  caSecretName: ""
+  caConfigMapName: ""
+  caKey: ca.crt
+  # Full path exposed to REDIS_SSL_CA_CERTS. The parent directory must exist
+  # in every Redis client image because Kubernetes mounts this as one file.
+  caMountPath: /etc/ssl/certs/redis-ca.crt
+
 # Uncomment to skip the bundled CNPG operator and its CRDs, and let an existing
 # cluster-managed CloudNativePG operator reconcile the Cluster CR below (keep
 # postgresql.enabled: true). Two operators/CRD copies on one cluster drift in
@@ -574,9 +593,20 @@ api:
       cpu: 3000m
       memory: 3Gi
 
-  # Optional health probes
+  # Optional health probes.
+  #
+  # Match the path to the probe. /health/ready reports not-ready once the request
+  # threadpool is saturated, which is what should pull a pod out of the Service.
+  # /health only reports that the process is up. Do NOT put /health/ready on the
+  # liveness probe: saturation is load-induced and hits every replica at once,
+  # so restarting on it turns a slowdown into an outage.
+  #
   # Example:
   # readinessProbe:
+  #   httpGet:
+  #     path: /health/ready
+  #     port: api-server-port
+  # livenessProbe:
   #   httpGet:
   #     path: /health
   #     port: api-server-port
@@ -1283,7 +1313,8 @@ externalSecret:
 # -- If set, adds `envFrom: - secretRef: name: <value>` to every backend
 # deployment so all keys in the named Secret are injected as env vars. Intended
 # for secrets that today live in plaintext under the `configMap:` block and
-# should move into a Secret (e.g. LINEAR_CLIENT_SECRET, BRAINTRUST_API_KEY).
+# should move into a Secret (e.g. LINEAR_CLIENT_SECRET,
+# SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET, BRAINTRUST_API_KEY).
 # Typically set to the same value as externalSecret.secretName.
 extraEnvFromSecret: ""
 

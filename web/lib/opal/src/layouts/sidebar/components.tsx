@@ -96,6 +96,8 @@ function SidebarRoot({ foldable = false, children }: SidebarRootProps) {
           {inner}
         </div>
         <div
+          // Pointer convenience only — the fold button dismisses via keyboard.
+          role="presentation"
           className="opal-sidebar-root__backdrop"
           data-variant="mobile"
           data-folded={foldedAttr}
@@ -117,6 +119,8 @@ function SidebarRoot({ foldable = false, children }: SidebarRootProps) {
           {inner}
         </div>
         <div
+          // Pointer convenience only — the fold button dismisses via keyboard.
+          role="presentation"
           className="opal-sidebar-root__backdrop"
           data-variant="small"
           data-folded={foldedAttr}
@@ -204,7 +208,7 @@ function SidebarHeader({
         <Interactive.Container
           type="button"
           size="fit"
-          rounding="sm"
+          rounding={2}
           aria-label={foldLabel}
         >
           <div
@@ -359,7 +363,7 @@ function SidebarSection({
           </Disabled>
         </Hoverable.Root>
       ) : (
-        <Spacer rem={0.5} />
+        <Spacer rem={1} />
       )}
       {children}
     </div>

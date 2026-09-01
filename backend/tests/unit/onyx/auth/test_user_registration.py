@@ -8,6 +8,7 @@ Tests cover:
 4. Case-insensitive email matching for existing user checks
 """
 
+from collections.abc import Iterator
 from types import SimpleNamespace, TracebackType
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +17,7 @@ import pytest
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users import exceptions
 
-from onyx.auth.schemas import UserCreate, UserRole
+from onyx.auth.schemas import UserCreate
 from onyx.auth.users import UserManager
 from onyx.db.enums import AccountType
 from onyx.error_handling.error_codes import OnyxErrorCode
@@ -46,12 +47,16 @@ def mock_async_session() -> MagicMock:
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.run_sync = AsyncMock(return_value=None)
+    session.get = AsyncMock(return_value=None)
     return session
 
 
 class _AsyncSessionContextManager:
     def __init__(self, session: MagicMock) -> None:
         self._session = session
+        # oauth_callback awaits session.get on the placeholder upgrade path.
+        if not isinstance(session.get, AsyncMock):
+            session.get = AsyncMock(return_value=None)
 
     async def __aenter__(self) -> MagicMock:
         return self._session
@@ -65,9 +70,25 @@ class _AsyncSessionContextManager:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _no_pinned_persona_seeding() -> Iterator[None]:
+    """Seeding needs a real session; these tests only cover registration logic."""
+    with patch(
+        "onyx.auth.users.seed_pinned_personas_from_featured", new_callable=AsyncMock
+    ):
+        yield
+
+
 def _mock_user_manager_methods(user_manager: UserManager) -> None:
     user_manager.validate_password = AsyncMock()
-    user_manager._assign_default_pinned_assistants = AsyncMock()
+
+
+def _bind_sqlalchemy_user_db_cls(
+    mock_user_db_cls: MagicMock, mock_user_db: MagicMock
+) -> None:
+    # SQLAlchemyUserDatabase[User, uuid.UUID](...) hits __getitem__, then call.
+    mock_user_db_cls.return_value = mock_user_db
+    mock_user_db_cls.__getitem__.return_value = mock_user_db_cls
 
 
 class TestDisposableEmailValidation:
@@ -151,7 +172,7 @@ class TestDisposableEmailValidation:
 class TestMultiTenantInviteLogic:
     """Test invite logic for multi-tenant environments."""
 
-    @patch("onyx.auth.users.SQLAlchemyUserAdminDB")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     @patch("onyx.auth.users.is_disposable_email", return_value=False)
     @patch("onyx.auth.users.verify_email_domain")
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
@@ -199,7 +220,7 @@ class TestMultiTenantInviteLogic:
         # Verify invite check was NOT called (user_count = 0)
         mock_verify_invited.assert_not_called()
 
-    @patch("onyx.auth.users.SQLAlchemyUserAdminDB")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     @patch("onyx.auth.users.is_disposable_email", return_value=False)
     @patch("onyx.auth.users.verify_email_domain")
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
@@ -444,7 +465,7 @@ class TestCaseInsensitiveEmailMatching:
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.get_user_count", new_callable=AsyncMock)
-    @patch("onyx.auth.users.SQLAlchemyUserAdminDB")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     @patch("onyx.auth.users.MULTI_TENANT", True)
     @patch("onyx.auth.users.CURRENT_TENANT_ID_CONTEXTVAR")
     @pytest.mark.asyncio
@@ -506,7 +527,7 @@ class TestCaseInsensitiveEmailMatching:
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.get_user_count", new_callable=AsyncMock)
     @patch("onyx.auth.users.verify_email_is_invited")
-    @patch("onyx.auth.users.SQLAlchemyUserAdminDB")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     @patch("onyx.auth.users.MULTI_TENANT", True)
     @patch("onyx.auth.users.CURRENT_TENANT_ID_CONTEXTVAR")
     @pytest.mark.asyncio
@@ -571,8 +592,10 @@ class TestOAuthDottedGmail:
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.remove_user_from_invited_users")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     async def test_oauth_create_does_not_block_dotted_gmail(
         self,
+        mock_user_db_cls: MagicMock,
         mock_remove_invited: MagicMock,  # noqa: ARG002
         mock_session_manager: MagicMock,
         mock_fetch_ee: MagicMock,
@@ -608,6 +631,7 @@ class TestOAuthDottedGmail:
         mock_user_db.session = MagicMock()
         mock_user_db.session.run_sync = AsyncMock()
         user_manager.user_db = mock_user_db
+        _bind_sqlalchemy_user_db_cls(mock_user_db_cls, mock_user_db)
 
         await user_manager.oauth_callback(
             oauth_name="google",
@@ -652,7 +676,9 @@ class TestOAuthNoAutoLinkExemptions:
         )
 
     @staticmethod
-    def _manager_with_existing(existing_user: MagicMock) -> UserManager:
+    def _manager_with_existing(
+        existing_user: MagicMock, mock_user_db_cls: MagicMock | None = None
+    ) -> UserManager:
         user_manager = UserManager(MagicMock())
         _mock_user_manager_methods(user_manager)
         user_manager.on_after_register = AsyncMock()
@@ -666,6 +692,8 @@ class TestOAuthNoAutoLinkExemptions:
         mock_user_db.update = AsyncMock(return_value=existing_user)
         mock_user_db.session = MagicMock()
         user_manager.user_db = mock_user_db
+        if mock_user_db_cls is not None:
+            _bind_sqlalchemy_user_db_cls(mock_user_db_cls, mock_user_db)
         return user_manager
 
     @pytest.mark.asyncio
@@ -681,8 +709,10 @@ class TestOAuthNoAutoLinkExemptions:
     @patch("onyx.auth.users.assign_user_to_default_groups__no_commit")
     @patch("onyx.auth.users._upgrade_will_add_seat", return_value=False)
     @patch("onyx.auth.users.get_session_with_current_tenant")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     async def test_placeholder_promoted_without_auto_link(
         self,
+        mock_user_db_cls: MagicMock,
         mock_sync_session_factory: MagicMock,
         mock_will_add_seat: MagicMock,  # noqa: ARG002
         mock_assign_groups: MagicMock,
@@ -708,7 +738,8 @@ class TestOAuthNoAutoLinkExemptions:
             account_type=AccountType.EXT_PERM_USER,
             is_active=is_active,
         )
-        user_manager = self._manager_with_existing(placeholder)
+        user_manager = self._manager_with_existing(placeholder, mock_user_db_cls)
+        mock_async_session.get = AsyncMock(return_value=placeholder)
 
         sync_user = MagicMock(is_active=is_active)
         mock_sync_db = MagicMock()
@@ -732,7 +763,6 @@ class TestOAuthNoAutoLinkExemptions:
         # The oauth account attaches instead of UserAlreadyExists, and the
         # existing non-web-login upgrade block promotes the placeholder.
         cast(AsyncMock, user_manager.user_db.add_oauth_account).assert_awaited_once()
-        assert sync_user.role == UserRole.BASIC
         assert sync_user.account_type == AccountType.STANDARD
         assert sync_user.is_verified is True
         # Promotion reactivates, so the web-login deactivation check must not
@@ -749,8 +779,10 @@ class TestOAuthNoAutoLinkExemptions:
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.remove_user_from_invited_users")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     async def test_unclaimed_row_is_claimed_by_first_login(
         self,
+        mock_user_db_cls: MagicMock,
         mock_remove_invited: MagicMock,  # noqa: ARG002
         mock_session_manager: MagicMock,
         mock_fetch_ee: MagicMock,
@@ -766,7 +798,7 @@ class TestOAuthNoAutoLinkExemptions:
         mock_fetch_ee.return_value = AsyncMock(return_value="test_tenant")
 
         provisioned = self._unclaimed()
-        user_manager = self._manager_with_existing(provisioned)
+        user_manager = self._manager_with_existing(provisioned, mock_user_db_cls)
 
         result = await user_manager.oauth_callback(
             oauth_name="okta",
@@ -796,8 +828,10 @@ class TestOAuthNoAutoLinkExemptions:
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.remove_user_from_invited_users")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     async def test_spoken_for_row_is_rejected(
         self,
+        mock_user_db_cls: MagicMock,
         mock_remove_invited: MagicMock,  # noqa: ARG002
         mock_session_manager: MagicMock,
         mock_fetch_ee: MagicMock,
@@ -811,7 +845,9 @@ class TestOAuthNoAutoLinkExemptions:
         )
         mock_fetch_ee.return_value = AsyncMock(return_value="test_tenant")
 
-        user_manager = self._manager_with_existing(self._unclaimed(**overrides))
+        user_manager = self._manager_with_existing(
+            self._unclaimed(**overrides), mock_user_db_cls
+        )
 
         with pytest.raises(exceptions.UserAlreadyExists):
             await user_manager.oauth_callback(
@@ -831,8 +867,10 @@ class TestOAuthNoAutoLinkExemptions:
     @patch("onyx.auth.users.fetch_ee_implementation_or_noop")
     @patch("onyx.auth.users.get_async_session_context_manager")
     @patch("onyx.auth.users.remove_user_from_invited_users")
+    @patch("onyx.auth.users.SQLAlchemyUserDatabase")
     async def test_deactivated_row_is_not_linked(
         self,
+        mock_user_db_cls: MagicMock,
         mock_remove_invited: MagicMock,  # noqa: ARG002
         mock_session_manager: MagicMock,
         mock_fetch_ee: MagicMock,
@@ -848,7 +886,7 @@ class TestOAuthNoAutoLinkExemptions:
         mock_fetch_ee.return_value = AsyncMock(return_value="test_tenant")
 
         deactivated = self._unclaimed(is_active=False)
-        user_manager = self._manager_with_existing(deactivated)
+        user_manager = self._manager_with_existing(deactivated, mock_user_db_cls)
 
         result = await user_manager.oauth_callback(
             oauth_name="okta",

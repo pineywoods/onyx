@@ -1,5 +1,7 @@
 "use client";
 
+import { useAdminRouteTitle } from "@/lib/adminNavLabels";
+import { useTranslations } from "next-intl";
 import { DateRangePicker } from "@/refresh-components/DateRangePicker";
 import { useTimeRange } from "@/lib/usage/hooks";
 import PerUserUsagePanel from "@/views/admin/PerUserUsagePanel";
@@ -11,26 +13,27 @@ import TokenRateLimitsPanel from "@/app/admin/token-rate-limits/TokenRateLimitsP
 const route = ADMIN_ROUTES.USAGE;
 
 export default function UsagePage() {
+  const t = useTranslations("admin.usage");
+  const adminRouteTitle = useAdminRouteTitle();
   const [timeRange, setTimeRange] = useTimeRange();
 
   return (
     <SettingsLayouts.Root width="lg">
       <SettingsLayouts.Header
         icon={route.icon}
-        title={route.title}
-        description="Monitor workspace spend and review usage by user."
+        title={adminRouteTitle(route)}
+        description={t("page.description")}
         divider
+        rightChildren={
+          <DateRangePicker
+            value={timeRange}
+            onValueChange={(value) => setTimeRange(value as any)}
+            size="sm"
+          />
+        }
       />
       <SettingsLayouts.Body>
-        <PerUserUsagePanel
-          timeRange={timeRange}
-          headerRight={
-            <DateRangePicker
-              value={timeRange}
-              onValueChange={(value) => setTimeRange(value as any)}
-            />
-          }
-        />
+        <PerUserUsagePanel timeRange={timeRange} />
         <Divider />
         <TokenRateLimitsPanel embedded />
       </SettingsLayouts.Body>
