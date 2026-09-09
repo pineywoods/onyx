@@ -67,3 +67,7 @@ plans
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 !.claude/settings.json
+
+# LOCAL-ONLY: pre-merge postgres dumps taken before upstream pulls.
+# They contain real user and chat data and must never reach the fork.
+pg-backup-*.sql
