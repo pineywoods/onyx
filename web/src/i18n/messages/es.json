@@ -64,6 +64,9 @@
       "addConnectors": {
         "label": "Añadir conectores"
       },
+      "authenticate": {
+        "label": "Autenticar"
+      },
       "configure": {
         "tooltip": "Configurar"
       },
@@ -653,6 +656,35 @@
       "showEnabledButton": {
         "ariaLabel": "Mostrar solo las herramientas activadas",
         "tooltip": "Mostrar solo las activadas"
+      }
+    },
+    "toolNames": {
+      "internalSearch": {
+        "label": "Búsqueda interna"
+      },
+      "imageGeneration": {
+        "label": "Generación de imágenes"
+      },
+      "webSearch": {
+        "label": "Búsqueda web"
+      },
+      "knowledgeGraph": {
+        "label": "Búsqueda en el grafo de conocimiento"
+      },
+      "openUrl": {
+        "label": "Abrir URL"
+      },
+      "codeInterpreter": {
+        "label": "Intérprete de código"
+      },
+      "fileReader": {
+        "label": "Lector de archivos"
+      },
+      "addMemory": {
+        "label": "Añadir a la memoria"
+      },
+      "codingAgent": {
+        "label": "Agente de código"
       }
     },
     "toolsPopover": {
@@ -5110,6 +5142,10 @@
           "title": "Autoalojados y personalizados"
         }
       },
+      "hideProviderGrouping": {
+        "description": "Muestra todos los modelos en una sola lista al elegir modelos en el chat. Ideal para un conjunto pequeño de modelos.",
+        "title": "Ocultar agrupación por proveedor"
+      },
       "modals": {
         "access": {
           "admin": {
@@ -5571,6 +5607,8 @@
       "toasts": {
         "providerDeleteFailed": "No se pudo eliminar el proveedor: {message}",
         "providerDeleted": "¡Proveedor eliminado correctamente!",
+        "settingsUpdateFailed": "No se pudo actualizar la configuración",
+        "settingsUpdated": "Configuración actualizada",
         "unknownError": "Error desconocido"
       }
     },
@@ -6064,6 +6102,10 @@
         },
         "section": {
           "title": "Autenticación"
+        },
+        "subjectRelink": {
+          "description": "Permite que los usuarios a los que el proveedor asignó un nuevo ID de sujeto vuelvan a iniciar sesión en la cuenta vinculada a su correo. Actívalo solo mientras cambias el cliente OIDC o el registro de la aplicación.",
+          "title": "Volver a vincular cuentas tras un cambio de cliente OIDC"
         }
       },
       "jwt": {
@@ -8522,6 +8564,9 @@
       "continueAsGuest": {
         "label": "o continúa como invitado"
       },
+      "createAccountButton": {
+        "label": "Crear una cuenta"
+      },
       "email": {
         "label": "Correo electrónico",
         "placeholder": "correo@tuempresa.com"
@@ -8531,6 +8576,9 @@
       },
       "invalidCredentials": {
         "error": "Correo electrónico o contraseña no válidos"
+      },
+      "joinButton": {
+        "label": "Unirse"
       },
       "noPassword": {
         "error": "Crea una cuenta para establecer una contraseña"
@@ -8559,6 +8607,9 @@
       },
       "passwordUppercase": {
         "error": "La contraseña debe contener al menos una letra mayúscula"
+      },
+      "signInButton": {
+        "label": "Iniciar sesión"
       },
       "tooManyRequests": {
         "error": "Demasiadas solicitudes. Inténtalo de nuevo más tarde."
@@ -8687,11 +8738,17 @@
       }
     },
     "login": {
+      "continueButton": {
+        "label": "Continuar"
+      },
       "createAccountButton": {
         "label": "Crear una cuenta"
       },
       "noSsoProviders": {
         "error": "No hay inicio de sesión SSO configurado para esa dirección. Prueba con Google o tu contraseña abajo."
+      },
+      "orDivider": {
+        "text": "o"
       },
       "resetPasswordButton": {
         "label": "Restablecer contraseña"
@@ -8716,6 +8773,12 @@
       },
       "verifiedMessage": {
         "title": "¡Tu correo ha sido verificado! Inicia sesión para continuar."
+      },
+      "welcomeHeading": {
+        "title": "Te damos la bienvenida a {appName}"
+      },
+      "welcomeSubtitle": {
+        "text": "Tu plataforma de IA de código abierto para el trabajo"
       },
       "workEmailField": {
         "label": "Correo de trabajo"
@@ -10666,6 +10729,9 @@
       "save": {
         "ariaLabel": "Guardar"
       }
+    },
+    "enabledCount": {
+      "label": "<value>{enabled}</value> de {total}"
     },
     "errorPages": {
       "accessRestricted": {

@@ -64,6 +64,9 @@
       "addConnectors": {
         "label": "Adicionar conectores"
       },
+      "authenticate": {
+        "label": "Autenticar"
+      },
       "configure": {
         "tooltip": "Configurar"
       },
@@ -653,6 +656,35 @@
       "showEnabledButton": {
         "ariaLabel": "Mostrar apenas as ferramentas ativadas",
         "tooltip": "Mostrar apenas as ativadas"
+      }
+    },
+    "toolNames": {
+      "internalSearch": {
+        "label": "Pesquisa interna"
+      },
+      "imageGeneration": {
+        "label": "Geração de imagens"
+      },
+      "webSearch": {
+        "label": "Pesquisa na web"
+      },
+      "knowledgeGraph": {
+        "label": "Pesquisa no grafo de conhecimento"
+      },
+      "openUrl": {
+        "label": "Abrir URL"
+      },
+      "codeInterpreter": {
+        "label": "Interpretador de código"
+      },
+      "fileReader": {
+        "label": "Leitor de arquivos"
+      },
+      "addMemory": {
+        "label": "Adicionar à memória"
+      },
+      "codingAgent": {
+        "label": "Agente de código"
       }
     },
     "toolsPopover": {
@@ -5110,6 +5142,10 @@
           "title": "Auto-hospedados e personalizados"
         }
       },
+      "hideProviderGrouping": {
+        "description": "Mostre todos os modelos em uma única lista ao escolher modelos no chat. Ideal para um conjunto pequeno de modelos.",
+        "title": "Ocultar agrupamento por provedor"
+      },
       "modals": {
         "access": {
           "admin": {
@@ -5571,6 +5607,8 @@
       "toasts": {
         "providerDeleteFailed": "Falha ao excluir o provedor: {message}",
         "providerDeleted": "Provedor excluído com sucesso!",
+        "settingsUpdateFailed": "Falha ao atualizar as configurações",
+        "settingsUpdated": "Configurações atualizadas",
         "unknownError": "Erro desconhecido"
       }
     },
@@ -6064,6 +6102,10 @@
         },
         "section": {
           "title": "Autenticação"
+        },
+        "subjectRelink": {
+          "description": "Permite que usuários que receberam um novo ID de sujeito do provedor voltem a entrar na conta vinculada ao seu e-mail. Ative apenas durante a mudança do cliente OIDC ou do registro do aplicativo.",
+          "title": "Revincular contas após uma mudança de cliente OIDC"
         }
       },
       "jwt": {
@@ -8522,6 +8564,9 @@
       "continueAsGuest": {
         "label": "ou continue como convidado"
       },
+      "createAccountButton": {
+        "label": "Criar uma conta"
+      },
       "email": {
         "label": "Endereço de e-mail",
         "placeholder": "email@suaempresa.com"
@@ -8531,6 +8576,9 @@
       },
       "invalidCredentials": {
         "error": "E-mail ou senha inválidos"
+      },
+      "joinButton": {
+        "label": "Entrar na equipe"
       },
       "noPassword": {
         "error": "Crie uma conta para definir uma senha"
@@ -8559,6 +8607,9 @@
       },
       "passwordUppercase": {
         "error": "A senha deve conter pelo menos uma letra maiúscula"
+      },
+      "signInButton": {
+        "label": "Entrar"
       },
       "tooManyRequests": {
         "error": "Muitas solicitações. Tente novamente mais tarde."
@@ -8687,11 +8738,17 @@
       }
     },
     "login": {
+      "continueButton": {
+        "label": "Continuar"
+      },
       "createAccountButton": {
         "label": "Criar uma conta"
       },
       "noSsoProviders": {
         "error": "Não há login SSO configurado para esse endereço. Tente o Google ou sua senha abaixo."
+      },
+      "orDivider": {
+        "text": "ou"
       },
       "resetPasswordButton": {
         "label": "Redefinir senha"
@@ -8716,6 +8773,12 @@
       },
       "verifiedMessage": {
         "title": "Seu e-mail foi verificado! Entre para continuar."
+      },
+      "welcomeHeading": {
+        "title": "Boas-vindas ao {appName}"
+      },
+      "welcomeSubtitle": {
+        "text": "Sua plataforma de IA de código aberto para o trabalho"
       },
       "workEmailField": {
         "label": "E-mail de trabalho"
@@ -10666,6 +10729,9 @@
       "save": {
         "ariaLabel": "Salvar"
       }
+    },
+    "enabledCount": {
+      "label": "<value>{enabled}</value> de {total}"
     },
     "errorPages": {
       "accessRestricted": {

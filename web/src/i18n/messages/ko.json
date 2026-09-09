@@ -64,6 +64,9 @@
       "addConnectors": {
         "label": "커넥터 추가"
       },
+      "authenticate": {
+        "label": "인증"
+      },
       "configure": {
         "tooltip": "구성"
       },
@@ -653,6 +656,35 @@
       "showEnabledButton": {
         "ariaLabel": "활성화된 도구만 표시",
         "tooltip": "활성화된 항목만 표시"
+      }
+    },
+    "toolNames": {
+      "internalSearch": {
+        "label": "내부 검색"
+      },
+      "imageGeneration": {
+        "label": "이미지 생성"
+      },
+      "webSearch": {
+        "label": "웹 검색"
+      },
+      "knowledgeGraph": {
+        "label": "지식 그래프 검색"
+      },
+      "openUrl": {
+        "label": "URL 열기"
+      },
+      "codeInterpreter": {
+        "label": "코드 인터프리터"
+      },
+      "fileReader": {
+        "label": "파일 리더"
+      },
+      "addMemory": {
+        "label": "메모리에 추가"
+      },
+      "codingAgent": {
+        "label": "코딩 에이전트"
       }
     },
     "toolsPopover": {
@@ -5110,6 +5142,10 @@
           "title": "자체 호스팅 및 사용자 지정"
         }
       },
+      "hideProviderGrouping": {
+        "description": "채팅에서 모델을 선택할 때 모든 모델을 하나의 목록으로 표시합니다. 모델 수가 적을 때 적합합니다.",
+        "title": "제공업체 그룹화 숨기기"
+      },
       "modals": {
         "access": {
           "admin": {
@@ -5571,6 +5607,8 @@
       "toasts": {
         "providerDeleteFailed": "제공자를 삭제하지 못했습니다: {message}",
         "providerDeleted": "제공자를 삭제했습니다!",
+        "settingsUpdateFailed": "설정을 업데이트하지 못했습니다",
+        "settingsUpdated": "설정을 업데이트했습니다",
         "unknownError": "알 수 없는 오류"
       }
     },
@@ -6064,6 +6102,10 @@
         },
         "section": {
           "title": "인증"
+        },
+        "subjectRelink": {
+          "description": "제공자가 새 주체 ID를 발급한 사용자가 이메일에 연결된 계정으로 다시 로그인할 수 있게 합니다. OIDC 클라이언트 또는 앱 등록을 변경하는 동안에만 켜십시오.",
+          "title": "OIDC 클라이언트 변경 후 계정 다시 연결"
         }
       },
       "jwt": {
@@ -8522,6 +8564,9 @@
       "continueAsGuest": {
         "label": "또는 게스트로 계속하기"
       },
+      "createAccountButton": {
+        "label": "계정 만들기"
+      },
       "email": {
         "label": "이메일 주소",
         "placeholder": "email@yourcompany.com"
@@ -8531,6 +8576,9 @@
       },
       "invalidCredentials": {
         "error": "이메일 또는 비밀번호가 잘못되었습니다"
+      },
+      "joinButton": {
+        "label": "참여"
       },
       "noPassword": {
         "error": "비밀번호를 설정하려면 계정을 만드세요"
@@ -8559,6 +8607,9 @@
       },
       "passwordUppercase": {
         "error": "비밀번호에는 대문자가 하나 이상 포함되어야 합니다"
+      },
+      "signInButton": {
+        "label": "로그인"
       },
       "tooManyRequests": {
         "error": "요청이 너무 많습니다. 나중에 다시 시도해 주세요."
@@ -8687,11 +8738,17 @@
       }
     },
     "login": {
+      "continueButton": {
+        "label": "계속"
+      },
       "createAccountButton": {
         "label": "계정 만들기"
       },
       "noSsoProviders": {
         "error": "해당 주소로 설정된 SSO 로그인이 없습니다. 아래에서 Google 또는 비밀번호로 로그인해 보세요."
+      },
+      "orDivider": {
+        "text": "또는"
       },
       "resetPasswordButton": {
         "label": "비밀번호 재설정"
@@ -8716,6 +8773,12 @@
       },
       "verifiedMessage": {
         "title": "이메일이 인증되었습니다! 계속하려면 로그인하세요."
+      },
+      "welcomeHeading": {
+        "title": "{appName}에 오신 것을 환영합니다"
+      },
+      "welcomeSubtitle": {
+        "text": "업무를 위한 오픈 소스 AI 플랫폼"
       },
       "workEmailField": {
         "label": "회사 이메일"
@@ -10666,6 +10729,9 @@
       "save": {
         "ariaLabel": "저장"
       }
+    },
+    "enabledCount": {
+      "label": "{total}개 중 <value>{enabled}</value>개"
     },
     "errorPages": {
       "accessRestricted": {

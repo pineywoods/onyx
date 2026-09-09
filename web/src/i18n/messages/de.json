@@ -64,6 +64,9 @@
       "addConnectors": {
         "label": "Konnektoren hinzufügen"
       },
+      "authenticate": {
+        "label": "Authentifizieren"
+      },
       "configure": {
         "tooltip": "Konfigurieren"
       },
@@ -653,6 +656,35 @@
       "showEnabledButton": {
         "ariaLabel": "Nur aktivierte Tools anzeigen",
         "tooltip": "Nur aktivierte anzeigen"
+      }
+    },
+    "toolNames": {
+      "internalSearch": {
+        "label": "Interne Suche"
+      },
+      "imageGeneration": {
+        "label": "Bilderzeugung"
+      },
+      "webSearch": {
+        "label": "Websuche"
+      },
+      "knowledgeGraph": {
+        "label": "Wissensgraph-Suche"
+      },
+      "openUrl": {
+        "label": "URL öffnen"
+      },
+      "codeInterpreter": {
+        "label": "Code-Interpreter"
+      },
+      "fileReader": {
+        "label": "Dateileser"
+      },
+      "addMemory": {
+        "label": "Erinnerung hinzufügen"
+      },
+      "codingAgent": {
+        "label": "Coding-Agent"
       }
     },
     "toolsPopover": {
@@ -5110,6 +5142,10 @@
           "title": "Selbst gehostet & Benutzerdefiniert"
         }
       },
+      "hideProviderGrouping": {
+        "description": "Zeigen Sie alle Modelle als eine Liste an, wenn Sie im Chat Modelle auswählen. Ideal für eine kleine Modellauswahl.",
+        "title": "Anbietergruppierung ausblenden"
+      },
       "modals": {
         "access": {
           "admin": {
@@ -5571,6 +5607,8 @@
       "toasts": {
         "providerDeleteFailed": "Der Anbieter konnte nicht gelöscht werden: {message}",
         "providerDeleted": "Anbieter erfolgreich gelöscht!",
+        "settingsUpdateFailed": "Die Einstellungen konnten nicht aktualisiert werden",
+        "settingsUpdated": "Einstellungen aktualisiert",
         "unknownError": "Unbekannter Fehler"
       }
     },
@@ -6064,6 +6102,10 @@
         },
         "section": {
           "title": "Authentifizierung"
+        },
+        "subjectRelink": {
+          "description": "Lässt Benutzer, denen der Anbieter eine neue Subject-ID ausgestellt hat, sich wieder bei dem mit ihrer E-Mail verknüpften Konto anmelden. Nur während eines Wechsels des OIDC-Clients oder der App-Registrierung einschalten.",
+          "title": "Konten nach einem OIDC-Client-Wechsel neu verknüpfen"
         }
       },
       "jwt": {
@@ -8522,6 +8564,9 @@
       "continueAsGuest": {
         "label": "oder als Gast fortfahren"
       },
+      "createAccountButton": {
+        "label": "Konto erstellen"
+      },
       "email": {
         "label": "E-Mail-Adresse",
         "placeholder": "email@ihrunternehmen.de"
@@ -8531,6 +8576,9 @@
       },
       "invalidCredentials": {
         "error": "Ungültige E-Mail-Adresse oder ungültiges Passwort"
+      },
+      "joinButton": {
+        "label": "Beitreten"
       },
       "noPassword": {
         "error": "Erstellen Sie ein Konto, um ein Passwort festzulegen"
@@ -8559,6 +8607,9 @@
       },
       "passwordUppercase": {
         "error": "Das Passwort muss mindestens einen Großbuchstaben enthalten"
+      },
+      "signInButton": {
+        "label": "Anmelden"
       },
       "tooManyRequests": {
         "error": "Zu viele Anfragen. Bitte versuchen Sie es später erneut."
@@ -8687,11 +8738,17 @@
       }
     },
     "login": {
+      "continueButton": {
+        "label": "Weiter"
+      },
       "createAccountButton": {
         "label": "Konto erstellen"
       },
       "noSsoProviders": {
         "error": "Für diese Adresse ist keine SSO-Anmeldung eingerichtet. Versuchen Sie Google oder Ihr Passwort unten."
+      },
+      "orDivider": {
+        "text": "oder"
       },
       "resetPasswordButton": {
         "label": "Passwort zurücksetzen"
@@ -8716,6 +8773,12 @@
       },
       "verifiedMessage": {
         "title": "Ihre E-Mail-Adresse wurde bestätigt! Bitte melden Sie sich an, um fortzufahren."
+      },
+      "welcomeHeading": {
+        "title": "Willkommen bei {appName}"
+      },
+      "welcomeSubtitle": {
+        "text": "Ihre Open-Source-KI-Plattform für die Arbeit"
       },
       "workEmailField": {
         "label": "Geschäftliche E-Mail"
@@ -10666,6 +10729,9 @@
       "save": {
         "ariaLabel": "Speichern"
       }
+    },
+    "enabledCount": {
+      "label": "<value>{enabled}</value> von {total}"
     },
     "errorPages": {
       "accessRestricted": {

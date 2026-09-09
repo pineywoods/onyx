@@ -102,6 +102,9 @@ SLACK_SERVICE_ACCOUNT_EMAIL = (
 
 # Key-Value store keys
 KV_PASSWORD_AUTH_ENABLED_KEY = "password_auth_enabled_override"
+KV_ALLOW_SAME_PROVIDER_SUBJECT_RELINK_KEY = (
+    "allow_same_provider_subject_relink_override"
+)
 KV_REINDEX_KEY = "needs_reindexing"
 KV_UNSTRUCTURED_API_KEY = "unstructured_api_key"
 KV_USER_STORE_KEY = "INVITED_USERS"
@@ -687,6 +690,7 @@ class OnyxCeleryTask:
 
     # Credential capability checks (granular runs of the registered checks)
     RUN_CAPABILITY_CHECKS = "run_capability_checks"
+    CHECK_FOR_STALE_CAPABILITY_RUNS = "check_for_stale_capability_runs"
 
     # chat retention
     CHECK_TTL_MANAGEMENT_TASK = "check_ttl_management_task"

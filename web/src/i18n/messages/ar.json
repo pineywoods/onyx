@@ -64,6 +64,9 @@
       "addConnectors": {
         "label": "إضافة موصّلات"
       },
+      "authenticate": {
+        "label": "مصادقة"
+      },
       "configure": {
         "tooltip": "تكوين"
       },
@@ -653,6 +656,35 @@
       "showEnabledButton": {
         "ariaLabel": "عرض الأدوات المفعّلة فقط",
         "tooltip": "عرض المفعّلة فقط"
+      }
+    },
+    "toolNames": {
+      "internalSearch": {
+        "label": "البحث الداخلي"
+      },
+      "imageGeneration": {
+        "label": "توليد الصور"
+      },
+      "webSearch": {
+        "label": "البحث في الويب"
+      },
+      "knowledgeGraph": {
+        "label": "البحث في مخطط المعرفة"
+      },
+      "openUrl": {
+        "label": "فتح رابط"
+      },
+      "codeInterpreter": {
+        "label": "مفسر الأكواد"
+      },
+      "fileReader": {
+        "label": "قارئ الملفات"
+      },
+      "addMemory": {
+        "label": "إضافة إلى الذاكرة"
+      },
+      "codingAgent": {
+        "label": "وكيل البرمجة"
       }
     },
     "toolsPopover": {
@@ -5110,6 +5142,10 @@
           "title": "مستضاف ذاتيًا ومخصص"
         }
       },
+      "hideProviderGrouping": {
+        "description": "اعرض جميع النماذج في قائمة واحدة عند اختيار النماذج في الدردشة. الأفضل مع مجموعة صغيرة من النماذج.",
+        "title": "إخفاء تجميع مزوّدي الخدمة"
+      },
       "modals": {
         "access": {
           "admin": {
@@ -5571,6 +5607,8 @@
       "toasts": {
         "providerDeleteFailed": "فشل حذف الموفر: {message}",
         "providerDeleted": "تم حذف الموفر بنجاح!",
+        "settingsUpdateFailed": "فشل تحديث الإعدادات",
+        "settingsUpdated": "تم تحديث الإعدادات",
         "unknownError": "خطأ غير معروف"
       }
     },
@@ -6064,6 +6102,10 @@
         },
         "section": {
           "title": "المصادقة"
+        },
+        "subjectRelink": {
+          "description": "يتيح للمستخدمين الذين أصدر لهم الموفر معرّف موضوع جديدًا تسجيل الدخول مجددًا إلى الحساب المرتبط ببريدهم الإلكتروني. فعّله فقط أثناء تغيير عميل OIDC أو تسجيل التطبيق.",
+          "title": "إعادة ربط الحسابات بعد تغيير عميل OIDC"
         }
       },
       "jwt": {
@@ -8522,6 +8564,9 @@
       "continueAsGuest": {
         "label": "أو تابع كضيف"
       },
+      "createAccountButton": {
+        "label": "إنشاء حساب"
+      },
       "email": {
         "label": "عنوان البريد الإلكتروني",
         "placeholder": "email@yourcompany.com"
@@ -8531,6 +8576,9 @@
       },
       "invalidCredentials": {
         "error": "البريد الإلكتروني أو كلمة المرور غير صالحة"
+      },
+      "joinButton": {
+        "label": "انضمام"
       },
       "noPassword": {
         "error": "أنشئ حسابًا لتعيين كلمة مرور"
@@ -8559,6 +8607,9 @@
       },
       "passwordUppercase": {
         "error": "يجب أن تحتوي كلمة المرور على حرف كبير واحد على الأقل"
+      },
+      "signInButton": {
+        "label": "تسجيل الدخول"
       },
       "tooManyRequests": {
         "error": "عدد كبير جدًا من الطلبات. يرجى المحاولة مرة أخرى لاحقًا."
@@ -8687,11 +8738,17 @@
       }
     },
     "login": {
+      "continueButton": {
+        "label": "متابعة"
+      },
       "createAccountButton": {
         "label": "إنشاء حساب"
       },
       "noSsoProviders": {
         "error": "لا يوجد تسجيل دخول SSO مهيأ لهذا العنوان. جرّب Google أو كلمة المرور أدناه."
+      },
+      "orDivider": {
+        "text": "أو"
       },
       "resetPasswordButton": {
         "label": "إعادة تعيين كلمة المرور"
@@ -8716,6 +8773,12 @@
       },
       "verifiedMessage": {
         "title": "تم التحقق من بريدك الإلكتروني! يرجى تسجيل الدخول للمتابعة."
+      },
+      "welcomeHeading": {
+        "title": "مرحبًا بك في {appName}"
+      },
+      "welcomeSubtitle": {
+        "text": "منصة الذكاء الاصطناعي مفتوحة المصدر لعملك"
       },
       "workEmailField": {
         "label": "البريد الإلكتروني للعمل"
@@ -10666,6 +10729,9 @@
       "save": {
         "ariaLabel": "حفظ"
       }
+    },
+    "enabledCount": {
+      "label": "<value>{enabled}</value> من {total}"
     },
     "errorPages": {
       "accessRestricted": {
